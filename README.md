@@ -1,5 +1,7 @@
 # Hermes Search Router
 
+**English** | [简体中文](README.zh-CN.md)
+
 One Hermes `web_search` / `web_extract` backend that routes to **DeepSeek**, **AnySearch**,
 or **local scripts**, with manual switching and ordered failure fallback.
 
@@ -18,6 +20,47 @@ Hermes web_search / web_extract
    └─ ScriptBackend     canonical JSON | argv + field mapping
 ```
 
+## Quick start
+
+Install directly from GitHub, the same way as other Hermes plugins:
+
+```bash
+# 1. Install and enable the plugin
+hermes plugins install ruqinhu/hermes-search-router --enable
+
+# 2. Route Hermes' web tools through the router
+hermes config set web.search_backend search-router
+hermes config set web.extract_backend search-router
+hermes config set web.backend search-router
+
+# 3. DeepSeek key: AnySearch works anonymously, DeepSeek needs a key.
+#    If DEEPSEEK_API_KEY is already in ~/.hermes/.env, skip this.
+grep -q '^DEEPSEEK_API_KEY=' ~/.hermes/.env || \
+  echo 'DEEPSEEK_API_KEY=sk-...' >> ~/.hermes/.env
+
+# 4. Restart/reload Hermes once, then verify in a new session
+hermes plugins list | grep -i search-router
+hermes tools
+```
+
+No `routes.yaml` is required for the default **DeepSeek + AnySearch** setup: the router
+uses sensible defaults when the file is missing. Add one only when you want local scripts
+or a different order.
+
+> `hermes plugins install` may show a security-scan prompt because this plugin can execute
+> **admin-configured** local scripts. The scripts are listed in `routes.yaml`; the model
+> cannot supply commands. Review the prompt, then allow the install.
+
+Optional self-check after install:
+
+```bash
+PLUGIN_DIR=$(find ~/.hermes -maxdepth 5 -type d \
+  \( -name 'search-router' -o -name 'web-search-router' \) 2>/dev/null | head -1)
+python3 "$PLUGIN_DIR/scripts/selfcheck.py"
+# live calls (may cost quota):
+python3 "$PLUGIN_DIR/scripts/smoke.py"
+```
+
 ## Why a provider plugin
 
 Hermes has one intended seam for replacing the web search backend:
@@ -26,40 +69,7 @@ Hermes has one intended seam for replacing the web search backend:
 tool, does not add a second tool, and does not depend on Hermes internals beyond the
 public `WebSearchProvider` ABC.
 
-`AnySearch` remains available as a separate plugin for emergency direct rollback.
-
-## Install on a Hermes host
-
-```bash
-# 1. Copy the plugin into the live Hermes home
-scp -r hermes-search-router root@HOST:/root/.hermes/plugins/web/search-router
-
-# 2. Enable it
-hermes plugins enable web/search-router
-
-# 3. Route Hermes' web tools through it
-hermes config set web.search_backend search-router
-hermes config set web.extract_backend search-router
-hermes config set web.backend search-router
-
-# 4. Add a route config (see examples/routes.yaml)
-mkdir -p ~/.hermes/plugin-data/search-router
-cp /root/.hermes/plugins/web/search-router/examples/routes.yaml \
-   ~/.hermes/plugin-data/search-router/routes.yaml
-chmod 600 ~/.hermes/plugin-data/search-router/routes.yaml
-
-# 5. Reload the gateway (or restart it), then open a new session
-hermes tools
-```
-
-`web.search_backend` / `web.extract_backend` are read per call. `routes.yaml` is also
-re-read per call (mtime + size), so switching or editing routes does **not** need a
-gateway restart after the plugin is loaded.
-
-If a gateway is running and the plugin was just enabled, confirm the live reload; if not,
-restart with the usual drain period (default 180s). On the reference host the restart must
-be triggered from a script via `systemd-run`, because restarting the gateway from inside
-the gateway process is blocked.
+AnySearch remains available as a separate plugin for emergency direct rollback.
 
 ## Route configuration
 
@@ -94,7 +104,7 @@ backends:
 ```
 
 If the file is missing, the router uses DeepSeek + AnySearch, `active: auto`, and
-`on_empty: fallback`.
+`on_empty: fallback`. See [`examples/routes.yaml`](examples/routes.yaml) for a full example.
 
 ### Manual switching
 
@@ -171,17 +181,17 @@ byted:
 Dry run: config, env presence, backend availability, executable paths. No network.
 
 ```bash
-python scripts/selfcheck.py
-python scripts/selfcheck.py --config /root/.hermes/plugin-data/search-router/routes.yaml
-python scripts/selfcheck.py --json
+python3 scripts/selfcheck.py
+python3 scripts/selfcheck.py --config /root/.hermes/plugin-data/search-router/routes.yaml
+python3 scripts/selfcheck.py --json
 ```
 
 Live: one search per available backend, optional extract. May consume quota.
 
 ```bash
-python scripts/smoke.py
-python scripts/smoke.py --query "DeepSeek V4 发布" --limit 3
-python scripts/smoke.py --extract https://example.com/
+python3 scripts/smoke.py
+python3 scripts/smoke.py --query "DeepSeek V4 release" --limit 3
+python3 scripts/smoke.py --extract https://example.com/
 ```
 
 DeepSeek Search/Fetch is free until **2026-11-01 00:00 Beijing time**, then billed per
@@ -193,7 +203,7 @@ uses a per-process 0.21s minimum interval.
 Offline; no network, no API key, no billing.
 
 ```bash
-python -m pytest -q
+python3 -m pytest -q
 ```
 
 - Adapters use `httpx.MockTransport`.
@@ -214,8 +224,30 @@ hermes config set web.backend anysearch
 The change applies to the next call. To remove the router entirely:
 
 ```bash
-hermes plugins disable web/search-router
+hermes plugins disable web-search-router   # or: hermes plugins disable web/search-router
 ```
+
+## Manual install (fallback)
+
+If your Hermes version cannot install from GitHub, copy the directory manually:
+
+```bash
+scp -r hermes-search-router root@HOST:/root/.hermes/plugins/web/search-router
+ssh root@HOST
+hermes plugins enable web/search-router
+hermes config set web.search_backend search-router
+hermes config set web.extract_backend search-router
+hermes config set web.backend search-router
+```
+
+`web.search_backend` / `web.extract_backend` are read per call. `routes.yaml` is also
+re-read per call (mtime + size), so switching or editing routes does **not** need a
+gateway restart after the plugin is loaded.
+
+If a gateway is running and the plugin was just enabled, confirm the live reload; if not,
+restart with the usual drain period (default 180s). On the reference host the restart must
+be triggered from a script via `systemd-run`, because restarting the gateway from inside
+the gateway process is blocked.
 
 ## Compatibility and limitations
 
