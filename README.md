@@ -221,6 +221,24 @@ DeepSeek Search/Fetch is free until **2026-11-01 00:00 Beijing time**, then bill
 successful request. DeepSeek is limited to 5 QPS per endpoint and account; the adapter
 uses a per-process 0.21s minimum interval.
 
+## Admin CLI
+
+Hermes 0.20.5+ exposes:
+
+```bash
+hermes search-router status              # config, env presence, chain, availability
+hermes search-router describe --json     # same payload with full chain detail
+hermes search-router test "query" --limit 5 --json
+hermes search-router test "query" --extract https://example.com/article
+hermes search-router bench "query" --limit 3 --json
+```
+
+- `status` / `describe` are offline: they read `routes.yaml` and build backends;
+  no search is issued.
+- `test` runs one search through the router and prints `backend` + `attempts`.
+- `bench` times each available backend directly (live; DeepSeek + AnySearch).
+- Standalone fallback: `python3 scripts/router_admin.py status --json`.
+
 ## Batch search for reports
 
 Reports often need several independent queries at once. Those calls are serial when
@@ -321,11 +339,12 @@ the gateway process is blocked.
 
 ## Compatibility and limitations
 
-- Target: Hermes Agent 0.20.5 (Python 3.11). Uses the public `WebSearchProvider` ABC;
-  no core patches.
-- `extract()` returns a bare list. Verified against the 0.20.5 dispatcher in
-  `tools/web_tools.py`, which iterates the list and checks `error` per entry. The
-  top-of-file ABC docstring still shows an envelope; the method contract is the list.
+- Target: Hermes Agent 0.20.5 and 0.21.5 (Python 3.11). Uses the public
+  `WebSearchProvider` ABC; no core patches.
+- `extract()` returns a bare list. Verified against the 0.20.5 and 0.21.5
+  dispatcher in `tools/web_tools.py`, which iterates the list and checks `error`
+  per entry. The top-of-file ABC docstring still shows an envelope; the method
+  contract is the list.
 - DeepSeek query is limited to 128 Unicode characters; control characters are rejected.
 - `DEEPSEEK_BASE_URL` / `ANYSEARCH_URL` overrides are restricted to the official
   hosts (HTTPS, default port). Loopback overrides require

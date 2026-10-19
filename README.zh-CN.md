@@ -215,6 +215,23 @@ python3 scripts/smoke.py --extract https://example.com/
 DeepSeek Search/Fetch 在 **2026-11-01 00:00（北京时间）前免费**，之后按成功请求计费。
 DeepSeek 每个 endpoint、每个账号限制 5 QPS；adapter 在进程内做 0.21 秒最小间隔。
 
+## 管理命令
+
+Hermes 0.20.5+ 提供：
+
+```bash
+hermes search-router status              # 配置、环境变量是否存在、链、可用性
+hermes search-router describe --json     # 带完整链信息的 JSON
+hermes search-router test "查询" --limit 5 --json
+hermes search-router test "查询" --extract https://example.com/article
+hermes search-router bench "查询" --limit 3 --json
+```
+
+- `status` / `describe` 离线：只读 `routes.yaml` 并构建 backend，不发搜索请求。
+- `test` 走一次真实 router，输出 `backend` + `attempts`。
+- `bench` 直接对每个可用 backend 计时（真实请求；DeepSeek + AnySearch）。
+- 独立兜底：`python3 scripts/router_admin.py status --json`。
+
 ## 报告批量搜索
 
 早/午/晚报经常要一次查多条独立信息。工具层连续发 `web_search` 是串行的，**≥4 条**
@@ -308,11 +325,11 @@ mtime + size 热加载；插件加载后，切换或修改路由**不需要**重
 
 ## 兼容性与限制
 
-- 目标：Hermes Agent 0.20.5（Python 3.11）。只使用公开的 `WebSearchProvider` ABC，
-  不改核心。
-- `extract()` 返回裸 list。已对照 0.20.5 的 `tools/web_tools.py` dispatcher 验证：它
-  直接遍历 list 并检查每条 `error`。ABC 文件顶部的注释仍写着 envelope，但方法契约是
-  list。
+- 目标：Hermes Agent 0.20.5 与 0.21.5（Python 3.11）。只使用公开的
+  `WebSearchProvider` ABC，不改核心。
+- `extract()` 返回裸 list。已对照 0.20.5 与 0.21.5 的 `tools/web_tools.py`
+  dispatcher 验证：它直接遍历 list 并检查每条 `error`。ABC 文件顶部的注释仍写着
+  envelope，但方法契约是 list。
 - DeepSeek query 限制 128 个 Unicode 字符；控制字符会被拒绝。
 - `DEEPSEEK_BASE_URL` / `ANYSEARCH_URL` 只允许官方 host（HTTPS、默认端口）。
   loopback 覆盖需要设置 `SEARCH_ROUTER_ALLOW_LOOPBACK=1`（仅测试/开发）。

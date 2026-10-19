@@ -3,7 +3,7 @@
 日期：2026-10-19
 对照版本：`dsh-web-search-plus` v0.1.7（源码快照，`lib/chain.js`、`lib/tavily.js`、
 `lib/schema.js`、`lib/index.js`、`lib/errors.js`）
-本项目：`hermes-search-router` v0.3.1（含 attempts/backend 对齐）
+本项目：`hermes-search-router` v0.4.0（含 attempts/backend 与 admin CLI 对齐）
 结论：**架构已经同构；还差的是可观测/探针、多 key 韧性、provider 复用和设置面。**
 
 ## 1. 同构的部分
@@ -27,7 +27,7 @@ web_search
 | 调用方取消不回退 | `throwIfAborted` + abort 穿透 | 同步 provider，无 AbortSignal | 运行模型不同 |
 | 可用性检查 | `available()` 廉价同步，链上至少一个可用 | `is_available()` 构建 backends 检查 | 已对齐 |
 | 路由报告 | `searchWithReport` 返回 `{result, route, attempts[]}` | 本次新增 `data.backend` + `data.attempts[]` | 已对齐（batch 可读） |
-| 链状态探针 | `describe()` 返回每个节点 available/detail | 只有 `selfcheck.py` 的 backend 可用性 | **缺口** |
+| 链状态探针 | `describe()` 返回每个节点 available/detail | `admin.py status/describe/test/bench` | 已对齐（v0.4.0） |
 | 多 key 轮换 | `KeyRing`，最多 20 槽，429/额度冷却，成功复位 | 单 key，按 backend 冷却 | **缺口** |
 | 复用官方 provider | 从 registry 取 `deepseek-official` 实例 | 自己实现 DeepSeek/AnySearch adapter | **缺口/可优化** |
 | 设置面 | schemastery volatile + 自绘设置页 | `routes.yaml` 热加载 | 不同形态，功能可用 |
@@ -64,14 +64,18 @@ DSH 没有这些报告专用逻辑，这是我们比它更贴近早/午/晚报�
 
 ### P1：`status / describe / test`（最像 DSH 的下一步）
 
+**状态：已实现（v0.4.0）。** `hermes search-router status|describe|test|bench`
+已可用，独立入口 `scripts/router_admin.py`。
+
 DSH 有 `describe()` 和 `searchWithReport`，设置页能展示“链上每个节点是否可用、
-这次实际命中谁、每个节点耗时/失败原因”。我们对应物是：
+这次实际命中谁、每个节点耗时/失败原因”。我们的对应物是：
 
 - `hermes search-router status`：active、fallback、每个 backend 的 available、
   最近一次 attempts、routes 路径、cooldown（进程内可见部分）。
+- `hermes search-router describe`：同一份信息的完整 JSON/链详情。
 - `hermes search-router test "<query>"`：跑一次并打印 `attempts` 链。
 - `hermes search-router bench`：DS vs AnySearch 同 query 的耗时/条数。
-- 0.20.5 不支持 `ctx.register_cli_command` 时，用 `scripts/router_admin.py` 等价实现。
+- `scripts/router_admin.py` 作为无 CLI 注册时的等价实现。
 
 ### P2：多 key 池 + provider 复用
 

@@ -90,12 +90,15 @@ DSH 的 `loommii/dsh-web-search-plus` 还说明：官方 provider 的设置项�
 
 ### P1：运维/可观测（中等收益）
 
-- `hermes search-router status`：active、fallback、每个 backend 可用性、最近错误、
-  冷却状态、routes.yaml 路径。
-- `hermes search-router test "<query>"`：跑一条并打印 backend/耗时/hits。
+**状态：已实现（v0.4.0）。**
+
+- `hermes search-router status`：active、fallback、每个 backend 可用性、env presence、
+  routes.yaml 路径、`last_error`。
+- `hermes search-router describe`：同一份信息的链详情。
+- `hermes search-router test "<query>"`：跑一条并打印 backend/attempts/耗时/hits，
+  可选 `--extract URL`。
 - `hermes search-router bench`：DeepSeek vs AnySearch 同 query 耗时/结果数。
-- 能注册 `ctx.register_cli_command` 就注册；0.20.5 不支持则提供
-  `scripts/router_admin.py` 作为等价入口。WSP/DSH 都有 status/probe，这是明显 UX 缺口。
+- 独立入口 `scripts/router_admin.py`。
 
 ### P2：配额韧性（按需）
 
@@ -107,10 +110,12 @@ DSH 的 `loommii/dsh-web-search-plus` 还说明：官方 provider 的设置项�
 
 ### P3：分发/集成（长期）
 
-- GitHub Actions：push 跑 118 个离线测试 + `contract_check.py`。
+- GitHub Actions：push 跑 147 个离线测试 + `contract_check.py`。
 - 安装脚本/setup 命令，解决 `hermes plugins install` 顶层/嵌套布局歧义。
-- `plugin.yaml config_schema` / 设置页（先确认 0.20.5 支持）。
+- `plugin.yaml config_schema` / 设置页（先确认 Hermes 版本支持）。
 - 把 `batch_search.py` 接进早/午报 cron 的 prompt（目前只更新了 skill 指引）。
+- 服务器 Hermes 已升级到 0.21.5（v2026.9.24），记录见
+  [`HERMES-UPGRADE-2026-10-19.md`](HERMES-UPGRADE-2026-10-19.md)。
 
 ## 6. 不建议照搬
 
