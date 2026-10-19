@@ -339,6 +339,9 @@ the gateway process is blocked.
 
 ## Prior art
 
+A source-level alignment review against DeepSeek Harness' `dsh-web-search-plus`
+(v0.1.7) is in [`docs/DSH-ALIGNMENT.md`](docs/DSH-ALIGNMENT.md).
+
 - [`robbyczgw-cla/hermes-web-search-plus`](https://github.com/robbyczgw-cla/hermes-web-search-plus) —
   multi-provider routing, fallback, native `wsp` backend. Design reference for fallback
   semantics and a proven native-backend integration.

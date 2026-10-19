@@ -325,6 +325,9 @@ mtime + size 热加载；插件加载后，切换或修改路由**不需要**重
 
 ## 参考项目
 
+与 DeepSeek Harness `dsh-web-search-plus`（v0.1.7）的逐项源码对齐见
+[`docs/DSH-ALIGNMENT.md`](docs/DSH-ALIGNMENT.md)。
+
 - [`robbyczgw-cla/hermes-web-search-plus`](https://github.com/robbyczgw-cla/hermes-web-search-plus) —
   多 provider 路由、失败回退、原生 `wsp` 后端。本项目的回退语义和原生后端接入参考了它。
 - [`NousResearch/hermes-agent` PR #45399](https://github.com/NousResearch/hermes-agent/pull/45399) —

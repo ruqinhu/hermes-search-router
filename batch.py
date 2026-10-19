@@ -278,6 +278,20 @@ def _annotate_hit(
     return item
 
 
+def _attempts_from(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, dict):
+        return []
+    attempts = raw.get("attempts")
+    if isinstance(attempts, list):
+        return [item for item in attempts if isinstance(item, dict)]
+    data = raw.get("data")
+    if isinstance(data, dict):
+        attempts = data.get("attempts")
+        if isinstance(attempts, list):
+            return [item for item in attempts if isinstance(item, dict)]
+    return []
+
+
 def _result_ok(
     query: str,
     raw: Any,
@@ -288,6 +302,7 @@ def _result_ok(
     max_age_days: float | None,
 ) -> dict[str, Any]:
     elapsed_ms = round((time.monotonic() - started) * 1000.0, 1)
+    attempts = _attempts_from(raw)
     if not isinstance(raw, dict):
         return {
             "query": query,
@@ -297,6 +312,7 @@ def _result_ok(
             "backend": None,
             "hits": [],
             "stale_count": 0,
+            "attempts": attempts,
             "error": "provider returned a non-object",
         }
     if not raw.get("success"):
@@ -308,6 +324,7 @@ def _result_ok(
             "backend": None,
             "hits": [],
             "stale_count": 0,
+            "attempts": attempts,
             "error": str(raw.get("error") or "search failed"),
         }
 
@@ -322,6 +339,7 @@ def _result_ok(
             "backend": None,
             "hits": [],
             "stale_count": 0,
+            "attempts": attempts,
             "error": "response is missing data.web",
         }
 
@@ -330,9 +348,13 @@ def _result_ok(
         for hit in web
         if isinstance(hit, dict) and hit.get("url")
     ]
-    backend = next(
-        (hit.get("backend") for hit in hits if hit.get("backend")),
-        None,
+    backend = (
+        data.get("backend")
+        if isinstance(data, dict) and isinstance(data.get("backend"), str)
+        else next(
+            (hit.get("backend") for hit in hits if hit.get("backend")),
+            None,
+        )
     )
     return {
         "query": query,
@@ -342,6 +364,7 @@ def _result_ok(
         "backend": backend,
         "hits": hits,
         "stale_count": sum(1 for hit in hits if hit.get("stale")),
+        "attempts": attempts,
         "error": None,
     }
 
@@ -360,6 +383,7 @@ def _search_one(
     with start_lock:
         starts.append(started)
     last_error = "search failed"
+    last_attempts: list[dict[str, Any]] = []
     search_query = f"{query}{config.query_suffix}" if config.query_suffix else query
     for attempt in range(retries + 1):
         tries = attempt + 1
@@ -368,6 +392,7 @@ def _search_one(
         except Exception as exc:  # noqa: BLE001 - isolate per-query failures
             last_error = f"{type(exc).__name__}: {exc}"
         else:
+            last_attempts = _attempts_from(raw)
             result = _result_ok(
                 query,
                 raw,
@@ -389,6 +414,7 @@ def _search_one(
         "backend": None,
         "hits": [],
         "stale_count": 0,
+        "attempts": last_attempts,
         "error": last_error,
     }
 
@@ -637,6 +663,7 @@ def run_batch(
                     "backend": None,
                     "hits": [],
                     "stale_count": 0,
+                    "attempts": [],
                     "error": f"{type(exc).__name__}: {exc}",
                 }
 

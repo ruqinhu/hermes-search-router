@@ -469,6 +469,41 @@ def test_dedupe_uses_normalized_urls():
     assert result["summary"]["duplicates_removed"] == 1
 
 
+def test_provider_attempts_are_reported():
+    attempts = [
+        {"backend": "dead", "ok": False, "error": "boom"},
+        {"backend": "deepseek", "ok": True, "hits": 1},
+    ]
+    fake = FakeProvider(
+        {
+            "q": {
+                "success": True,
+                "data": {
+                    "web": [hit("T", "https://e/1")],
+                    "backend": "deepseek",
+                    "attempts": attempts,
+                },
+            }
+        }
+    )
+    result = run_batch(fake, ["q"], config())
+    item = result["results"]["q"]
+    assert item["backend"] == "deepseek"
+    assert item["attempts"] == attempts
+
+    failed = FakeProvider(
+        {
+            "q": {
+                "success": False,
+                "error": "all failed",
+                "attempts": attempts,
+            }
+        }
+    )
+    item = run_batch(failed, ["q"], config(retries=0))["results"]["q"]
+    assert item["attempts"] == attempts
+
+
 def test_concurrent_results_and_order():
     queries = ["q1", "q2", "q3", "q4", "q5"]
     fake = FakeProvider(

@@ -91,6 +91,12 @@ def test_auto_falls_back_on_error(tmp_path):
     result = provider.search("q", 5)
     assert result["success"] is True
     assert result["data"]["web"][0]["backend"] == "b"
+    assert result["data"]["backend"] == "b"
+    assert len(result["data"]["attempts"]) == 2
+    assert result["data"]["attempts"][0]["backend"] == "a"
+    assert result["data"]["attempts"][0]["ok"] is False
+    assert result["data"]["attempts"][1]["backend"] == "b"
+    assert result["data"]["attempts"][1]["ok"] is True
     assert len(a.search_calls) == 1
     assert len(b.search_calls) == 1
 

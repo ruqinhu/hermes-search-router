@@ -133,6 +133,14 @@ def _print_human(result: dict, *, profile: str) -> None:
                 f"[FAIL] {query}  tries={item.get('tries')} "
                 f"{item.get('elapsed_ms')}ms  error={item.get('error')}"
             )
+        attempts = item.get("attempts") or []
+        if len(attempts) > 1:
+            chain = " -> ".join(
+                f"{attempt.get('backend')}"
+                f"({'empty' if attempt.get('empty') else ('ok' if attempt.get('ok') else 'fail')})"
+                for attempt in attempts
+            )
+            print(f"  attempts: {chain}")
 
 
 def main(argv: list[str] | None = None) -> int:

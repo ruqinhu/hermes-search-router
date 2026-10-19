@@ -154,7 +154,7 @@ class SearchRouterProvider(WebSearchProvider):
             }
 
         deadline = self._clock() + config.search_total_timeout
-        attempts: list[str] = []
+        attempts: list[dict[str, Any]] = []
         saw_empty = False
         saw_failure = False
 
@@ -162,7 +162,14 @@ class SearchRouterProvider(WebSearchProvider):
             backend_key = self._backend_key(backends, backend)
             remaining = deadline - self._clock()
             if remaining <= 0:
-                attempts.append(f"{backend_key}: total timeout")
+                attempts.append(
+                    {
+                        "backend": backend_key,
+                        "ok": False,
+                        "error": "total timeout",
+                        "elapsed_ms": 0.0,
+                    }
+                )
                 break
             timeout = max(
                 0.1,
@@ -171,6 +178,7 @@ class SearchRouterProvider(WebSearchProvider):
                     remaining,
                 ),
             )
+            started = self._clock()
             try:
                 outcome = backend.search(query, limit_value, timeout=timeout)
             except Exception as exc:  # noqa: BLE001 - adapters should not raise
@@ -178,10 +186,19 @@ class SearchRouterProvider(WebSearchProvider):
                     f"{type(exc).__name__}: {exc}",
                     cooldown=config.cooldown_seconds,
                 )
+            elapsed_ms = round((self._clock() - started) * 1000.0, 1)
 
             if outcome.ok:
                 hits = self._normalize(outcome.hits, limit_value, backend_key)
                 if hits:
+                    attempts.append(
+                        {
+                            "backend": backend_key,
+                            "ok": True,
+                            "hits": len(hits),
+                            "elapsed_ms": elapsed_ms,
+                        }
+                    )
                     logger.info(
                         "search-router: query_chars=%d limit=%d backend=%s hits=%d "
                         "attempts=%d",
@@ -189,22 +206,58 @@ class SearchRouterProvider(WebSearchProvider):
                         limit_value,
                         backend_key,
                         len(hits),
-                        len(attempts) + 1,
+                        len(attempts),
                     )
-                    return {"success": True, "data": {"web": hits}}
+                    return {
+                        "success": True,
+                        "data": {
+                            "web": hits,
+                            "backend": backend_key,
+                            "attempts": attempts,
+                        },
+                    }
                 if config.on_empty == "accept":
+                    attempts.append(
+                        {
+                            "backend": backend_key,
+                            "ok": True,
+                            "hits": 0,
+                            "empty": True,
+                            "elapsed_ms": elapsed_ms,
+                        }
+                    )
                     logger.info(
                         "search-router: query_chars=%d backend=%s empty (accepted)",
                         len(query),
                         backend_key,
                     )
-                    return {"success": True, "data": {"web": []}}
+                    return {
+                        "success": True,
+                        "data": {
+                            "web": [],
+                            "backend": backend_key,
+                            "attempts": attempts,
+                        },
+                    }
                 saw_empty = True
-                attempts.append(f"{backend_key}: empty")
+                attempts.append(
+                    {
+                        "backend": backend_key,
+                        "ok": True,
+                        "hits": 0,
+                        "empty": True,
+                        "elapsed_ms": elapsed_ms,
+                    }
+                )
                 continue
 
             attempts.append(
-                f"{backend_key}: {truncate(outcome.error or 'failed', 160)}"
+                {
+                    "backend": backend_key,
+                    "ok": False,
+                    "error": truncate(outcome.error or "failed", 160),
+                    "elapsed_ms": elapsed_ms,
+                }
             )
             saw_failure = True
             self._mark_failure(backend_key, outcome)
@@ -214,13 +267,25 @@ class SearchRouterProvider(WebSearchProvider):
         # a 429 on the fallback) must stay visible instead of being masked.
         if saw_empty and not saw_failure:
             logger.info("search-router: all candidates returned empty")
-            return {"success": True, "data": {"web": []}}
+            return {
+                "success": True,
+                "data": {
+                    "web": [],
+                    "backend": attempts[-1].get("backend") if attempts else None,
+                    "attempts": attempts,
+                },
+            }
 
         error = "search-router: all backends failed"
-        if attempts:
-            error += ": " + "; ".join(attempts)
+        attempt_text = self._attempts_text(attempts)
+        if attempt_text:
+            error += ": " + attempt_text
         logger.warning("search-router: %s", truncate(error, 2000))
-        return {"success": False, "error": truncate(error, 300)}
+        return {
+            "success": False,
+            "error": truncate(error, 300),
+            "attempts": attempts,
+        }
 
     def extract(
         self, urls: Sequence[str], **kwargs: Any
@@ -487,6 +552,17 @@ class SearchRouterProvider(WebSearchProvider):
             if candidate is backend:
                 return name
         return str(getattr(backend, "name", "backend"))
+
+    @staticmethod
+    def _attempts_text(attempts: Sequence[dict[str, Any]]) -> str:
+        parts: list[str] = []
+        for attempt in attempts:
+            name = attempt.get("backend") or "?"
+            if attempt.get("ok"):
+                parts.append(f"{name}: {'empty' if attempt.get('empty') else 'ok'}")
+            else:
+                parts.append(f"{name}: {attempt.get('error') or 'failed'}")
+        return "; ".join(parts)
 
     @classmethod
     def _looks_like_health_error(cls, text: str) -> bool:
