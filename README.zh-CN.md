@@ -231,10 +231,17 @@ python3 "$PLUGIN_DIR/scripts/batch_search.py" \
 
 - 最多 **12** 条并发；每条查询重试 1 次；失败隔离。
 - `results` 按输入顺序按 query 返回，带 `wall_ms`、`spread_ms`（第一波启动极差）、
-  单条耗时、`backend`、`age_days`、`stale`、`date_unknown`。
+  单条耗时、`backend`、`age_days`、`stale`、`date_unknown`、`date_source`。
+- URL 日期兜底：provider 没有 `date` 时，从 URL 的 `/YYYY-MM-DD/`、`/YYYY-MM/DD/`、
+  `/YYYY/MM/DD/`、`/a/YYYYMMDD...`、`/pYYYYMMDD...` 提取，并标
+  `date_source: "url"`。
+- `--dedupe-urls` 先归一化 URL（去 fragment、追踪参数）再跨查询去重。
+- `--min-authority` / `--require-authority` 按 DeepSeek authority（0–4）过滤。
+- `--site`、`--lang`、`--after` 追加 DeepSeek 查询语法；`--sort
+  relevance|date|authority` 调整返回顺序。
+- `--extract-top N` 为每条查询前 N 条追加 `content`。
 - profile：`general`（6 条/7 天）、`news`（8 条/3 天）、
   `research`（5 条/30 天，前 2 条抽正文）。
-- `--extract-top N` 为每条查询前 N 条追加 `content`。
 - 行情/公告/龙虎榜等结构化数据仍走直连采集；batch 只负责新闻/定性查询。
 
 完整早/午/晚报 playbook、源选择、旧闻校验和时间盒见

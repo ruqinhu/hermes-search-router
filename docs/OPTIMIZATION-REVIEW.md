@@ -2,6 +2,7 @@
 
 日期：2026-10-19
 范围：`hermes-search-router` 对照 DeepSeek Harness（DSH）插件与同类开源搜索插件
+状态：P0 已实现，通过两轮 review + 服务器验证；P1/P2/P3 待做
 结论：架构方向正确；剩余优化空间主要在**报告搜索质量、运维/可观测、配额韧性**，
 不在“再换一个搜索后端”。
 
@@ -69,17 +70,23 @@ DSH 的 `loommii/dsh-web-search-plus` 还说明：官方 provider 的设置项�
 
 ### P0：报告搜索质量（低风险，直接收益）
 
+**状态：已实现（v0.3.0），并已在服务器用 DeepSeek/AnySearch 实测。**
+
 1. **URL 日期兜底**：DeepSeek 有 `date`，AnySearch 常常没有。对没有 `date` 的 hit，
-   从 URL 提取 `/YYYY-MM-DD/`、`/a/YYYYMMDD...`、`/YYYYMMDD`，填 `date`、
-   `date_source="url"`，再算 `age_days/stale`。直接减少 `date_unknown` 和旧闻误判。
+   从 URL 提取 `/YYYY-MM-DD/`、`/YYYY-MM/DD/`、`/YYYY/MM/DD/`、`/a/YYYYMMDD...`、
+   `/pYYYYMMDD...`、`/YYYYMMDD`，填 `date`、`date_source="url"`，再算
+   `age_days/stale`。直接减少 `date_unknown` 和旧闻误判。
 2. **URL 归一化去重**：去 fragment、去 `utm_*` / `spm` / `scm` / `from` 等追踪参数、
-   统一 host/scheme、排序 query、去尾部 `/`，用归一化 key 做跨 query 去重；
-   输出保留原始 URL。解决 live 里“同一篇新浪研报两个 URL”的问题。
-3. **权威度过滤/排序**：`--min-authority 2/3`；缺 `authority` 的 hit 默认保留
-   （AnySearch 没有），另给 `--require-authority` 才丢弃。
-4. **查询操作符**：`--site example.com`（可重复）、`--lang zh`、`--after 2026-10-17`，
-   拼成 DeepSeek 支持的 `site:... lang:zh after:...`；文档注明 AnySearch 回退可能忽略。
-5. **`--sort relevance|date|authority`**：本地排序，只影响返回顺序，不增加请求。
+   统一 host/scheme（http/https、`www.` 前缀）、排序 query、去尾部 `/`，用归一化 key
+   做跨 query 去重；输出保留原始 URL。能消掉同一 URL 的分享/追踪变体；不同路径的同文
+   （例如新浪 `paper.php` 与 `vReport_Show` 两种详情页）不在 P0，需标题相似度，暂不做。
+3. **权威度过滤/排序**：`--min-authority 2/3/4`（CLI 校验 0–4）；缺 `authority` 的 hit
+   默认保留（AnySearch 没有），另给 `--require-authority` 才丢弃。
+4. **查询操作符**：`--site example.com`（可重复，多个按 DeepSeek 文档用 `OR` 连接）、
+   `--lang zh`、`--after 2026-10-17`，拼成 DeepSeek 支持的
+   `site:... lang:zh after:...`；文档注明 AnySearch 回退可能忽略。
+5. **`--sort relevance|date|authority`**：本地排序，只影响返回顺序，不增加请求；
+   `authority` 对缺失值保持稳定顺序，不按日期重排。
 
 ### P1：运维/可观测（中等收益）
 

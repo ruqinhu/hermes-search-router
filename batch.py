@@ -14,18 +14,53 @@ It ports the report pipeline lessons from the live Hermes host:
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Sequence
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 MAX_WORKERS = 12
 MAX_COUNT = 50
 MAX_RETRIES = 3
 MAX_EXTRACT_TOP = 10
 DEFAULT_EXTRACT_CHARS = 4000
+
+_TRACKING_PARAMS = {
+    "utm_source",
+    "utm_medium",
+    "utm_campaign",
+    "utm_term",
+    "utm_content",
+    "utm_id",
+    "spm",
+    "scm",
+    "from",
+    "share",
+    "share_token",
+    "ref",
+    "referrer",
+    "fbclid",
+    "gclid",
+    "yclid",
+    "igshid",
+    "mc_cid",
+    "mc_eid",
+    "_ga",
+    "_gl",
+}
+_URL_DATE_PATTERNS = (
+    re.compile(r"/(20\d{2})-(\d{2})-(\d{2})(?:/|$)"),
+    re.compile(r"/(20\d{2})-(\d{2})/(\d{2})(?:/|$)"),
+    re.compile(r"/(20\d{2})/(\d{2})/(\d{2})(?:/|$)"),
+    re.compile(r"/a/(20\d{6})"),
+    re.compile(r"/p(20\d{6})"),
+    re.compile(r"/(20\d{6})(?:\D|$)"),
+)
+_SORT_MODES = {"relevance", "date", "authority"}
 
 PROFILES: dict[str, dict[str, Any]] = {
     "general": {"count": 6, "max_age_days": 7.0, "extract_top": 0},
@@ -47,6 +82,10 @@ class BatchConfig:
     dedupe_urls: bool = False
     extract_top: int = 0
     extract_max_chars: int = DEFAULT_EXTRACT_CHARS
+    min_authority: int | None = None
+    require_authority: bool = False
+    sort: str = "relevance"
+    query_suffix: str = ""
     sleep: Callable[[float], None] = time.sleep
     now: Callable[[], datetime] = _utcnow
 
@@ -56,6 +95,113 @@ def resolve_profile(name: str) -> dict[str, Any]:
     if profile is None:
         raise ValueError(f"unknown profile {name!r}; choose one of {sorted(PROFILES)}")
     return dict(profile)
+
+
+def normalize_url(url: Any) -> str:
+    """Canonical key for cross-query dedupe; the original URL is kept in output."""
+
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+    try:
+        parts = urlsplit(raw)
+    except ValueError:
+        return raw
+    if not parts.scheme or not parts.hostname:
+        return raw
+    scheme = parts.scheme.lower()
+    if scheme in {"http", "https"}:
+        # Dedupe key only: report the same page once across http/https variants.
+        scheme = "https"
+    try:
+        host = parts.hostname.lower()
+    except ValueError:
+        return raw
+    if host.startswith("www."):
+        host = host[4:]
+    if not host:
+        return raw
+    try:
+        port = parts.port
+    except ValueError:
+        return raw
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = host
+    if port and port not in (80, 443):
+        netloc = f"{host}:{port}"
+    pairs = [
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if key.lower() not in _TRACKING_PARAMS
+        and not key.lower().startswith("utm_")
+    ]
+    query = urlencode(sorted(pairs))
+    path = parts.path or "/"
+    if path != "/" and path.endswith("/"):
+        path = path.rstrip("/")
+    return urlunsplit((scheme, netloc, path, query, ""))
+
+
+def date_from_url(url: Any) -> datetime | None:
+    text = str(url or "")
+    for pattern in _URL_DATE_PATTERNS:
+        match = pattern.search(text)
+        if not match:
+            continue
+        groups = match.groups()
+        if len(groups) == 3:
+            year, month, day = groups
+        else:
+            compact = groups[0]
+            year, month, day = compact[:4], compact[4:6], compact[6:8]
+        try:
+            return datetime(int(year), int(month), int(day), tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def build_query_suffix(
+    sites: Iterable[str] | str | None = None,
+    lang: str | None = None,
+    after: str | None = None,
+) -> str:
+    """Build a DeepSeek search-operator suffix.
+
+    Multiple sites are joined with ``OR`` (DeepSeek syntax). AnySearch fallback
+    may treat these operators literally, so use them when DeepSeek quality
+    matters.
+    """
+
+    if isinstance(sites, str):
+        sites = [sites]
+    site_list: list[str] = []
+    for raw_site in sites or []:
+        value = str(raw_site).strip()
+        if not value:
+            continue
+        value = re.sub(r"^https?://", "", value, flags=re.IGNORECASE)
+        value = value.split("/", 1)[0].split("?", 1)[0].strip()
+        if not re.fullmatch(r"[A-Za-z0-9.-]+", value):
+            raise ValueError(f"invalid --site value: {raw_site!r}")
+        site_list.append(value)
+    parts: list[str] = []
+    if site_list:
+        parts.append(" OR ".join(f"site:{site}" for site in site_list))
+    if lang and str(lang).strip():
+        value = str(lang).strip()
+        if not re.fullmatch(r"[A-Za-z-]+(?:,[A-Za-z-]+)*", value):
+            raise ValueError(f"invalid --lang value: {lang!r}")
+        parts.append(f"lang:{value}")
+    if after and str(after).strip():
+        value = str(after).strip()
+        try:
+            datetime.strptime(value, "%Y-%m-%d")
+        except ValueError as exc:
+            raise ValueError("after must be YYYY-MM-DD") from exc
+        parts.append(f"after:{value}")
+    return (" " + " ".join(parts)) if parts else ""
 
 
 def _unique_queries(queries: Iterable[Any]) -> tuple[list[str], int]:
@@ -89,8 +235,9 @@ def _parse_datetime(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def _age_days(value: Any, now: Callable[[], datetime]) -> tuple[float | None, bool]:
-    parsed = _parse_datetime(value)
+def _age_for_datetime(
+    parsed: datetime | None, now: Callable[[], datetime]
+) -> tuple[float | None, bool]:
     if parsed is None:
         return None, True
     reference = now()
@@ -107,7 +254,20 @@ def _annotate_hit(
     max_age_days: float | None,
 ) -> dict[str, Any]:
     item = dict(hit)
-    age, unknown = _age_days(item.get("date"), now)
+    field_dt = _parse_datetime(item.get("date"))
+    url_dt = date_from_url(item.get("url"))
+    if field_dt is not None:
+        parsed = field_dt
+        source = "field"
+    elif url_dt is not None:
+        parsed = url_dt
+        source = "url"
+        item["date"] = url_dt.isoformat()
+    else:
+        parsed = None
+        source = None
+    age, unknown = _age_for_datetime(parsed, now)
+    item["date_source"] = source
     item["date_unknown"] = unknown
     item["age_days"] = round(age, 2) if age is not None else None
     item["stale"] = bool(
@@ -200,10 +360,11 @@ def _search_one(
     with start_lock:
         starts.append(started)
     last_error = "search failed"
+    search_query = f"{query}{config.query_suffix}" if config.query_suffix else query
     for attempt in range(retries + 1):
         tries = attempt + 1
         try:
-            raw = provider.search(query, count)
+            raw = provider.search(search_query, count)
         except Exception as exc:  # noqa: BLE001 - isolate per-query failures
             last_error = f"{type(exc).__name__}: {exc}"
         else:
@@ -241,18 +402,87 @@ def _dedupe_results(
         kept: list[dict[str, Any]] = []
         per_query_removed = 0
         for hit in result.get("hits", []):
-            url = str(hit.get("url") or "").strip()
-            if url and url in seen:
+            key = normalize_url(hit.get("url"))
+            if key and key in seen:
                 removed += 1
                 per_query_removed += 1
                 continue
-            if url:
-                seen.add(url)
+            if key:
+                seen.add(key)
             kept.append(hit)
         result["hits"] = kept
         result["duplicates_removed"] = per_query_removed
         result["stale_count"] = sum(1 for hit in kept if hit.get("stale"))
     return removed
+
+
+def _authority_value(hit: dict[str, Any]) -> int | None:
+    value = hit.get("authority")
+    if isinstance(value, bool):
+        return int(value)
+    try:
+        return int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _set_positions(hits: Sequence[dict[str, Any]]) -> None:
+    for index, hit in enumerate(hits, 1):
+        hit["position"] = index
+
+
+def _filter_authority(
+    ordered: Sequence[dict[str, Any]],
+    *,
+    min_authority: int | None,
+    require_authority: bool,
+) -> int:
+    removed = 0
+    for result in ordered:
+        kept: list[dict[str, Any]] = []
+        per_query_removed = 0
+        for hit in result.get("hits", []):
+            authority = _authority_value(hit)
+            if authority is None:
+                if require_authority:
+                    removed += 1
+                    per_query_removed += 1
+                    continue
+                kept.append(hit)
+                continue
+            if min_authority is not None and authority < min_authority:
+                removed += 1
+                per_query_removed += 1
+                continue
+            kept.append(hit)
+        result["hits"] = kept
+        result["filtered_authority"] = per_query_removed
+        result["stale_count"] = sum(1 for hit in kept if hit.get("stale"))
+        _set_positions(kept)
+    return removed
+
+
+def _date_key(hit: dict[str, Any]) -> float:
+    parsed = _parse_datetime(hit.get("date")) or date_from_url(hit.get("url"))
+    return parsed.timestamp() if parsed else float("-inf")
+
+
+def _sort_hits(ordered: Sequence[dict[str, Any]], mode: str) -> None:
+    if mode not in _SORT_MODES:
+        return
+    for result in ordered:
+        hits = result.get("hits", [])
+        if mode == "authority":
+            hits.sort(
+                key=lambda hit: (
+                    _authority_value(hit) is not None,
+                    _authority_value(hit) if _authority_value(hit) is not None else -1,
+                ),
+                reverse=True,
+            )
+        elif mode == "date":
+            hits.sort(key=_date_key, reverse=True)
+        _set_positions(hits)
 
 
 def _extract_top_hits(
@@ -350,6 +580,18 @@ def run_batch(
     max_age_days = cfg.max_age_days
     if max_age_days is not None and float(max_age_days) < 0:
         max_age_days = 0.0
+    min_authority = cfg.min_authority
+    if min_authority is not None:
+        try:
+            min_authority = int(min_authority)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("min_authority must be an integer 0-4") from exc
+        min_authority = max(0, min(4, min_authority))
+    sort_mode = cfg.sort if cfg.sort in _SORT_MODES else "relevance"
+    query_suffix = cfg.query_suffix if isinstance(cfg.query_suffix, str) else ""
+    query_suffix = query_suffix.strip()
+    if query_suffix:
+        query_suffix = " " + query_suffix
     effective = replace(
         cfg,
         workers=workers,
@@ -358,6 +600,9 @@ def run_batch(
         max_age_days=max_age_days,
         extract_top=extract_top,
         extract_max_chars=max_chars,
+        min_authority=min_authority,
+        sort=sort_mode,
+        query_suffix=query_suffix,
     )
 
     starts: list[float] = []
@@ -407,8 +652,23 @@ def run_batch(
         else 0.0
     )
     duplicates_removed = 0
+    filtered_authority = 0
+    if min_authority is not None or cfg.require_authority:
+        filtered_authority = _filter_authority(
+            ordered,
+            min_authority=min_authority,
+            require_authority=bool(cfg.require_authority),
+        )
+    # Sort before dedupe so a duplicate inside one query keeps the best hit
+    # under the requested order, not merely the provider's first row.
+    _sort_hits(ordered, sort_mode)
     if cfg.dedupe_urls:
         duplicates_removed = _dedupe_results(ordered)
+    for result in ordered:
+        _set_positions(result.get("hits", []))
+        result["stale_count"] = sum(
+            1 for hit in result.get("hits", []) if hit.get("stale")
+        )
 
     extract_queries = 0
     extract_failures = 0
@@ -440,6 +700,10 @@ def run_batch(
         "count": count,
         "retries": retries,
         "max_age_days": max_age_days,
+        "min_authority": min_authority,
+        "require_authority": bool(cfg.require_authority),
+        "sort": sort_mode,
+        "query_suffix": query_suffix,
         "dedupe_urls": bool(cfg.dedupe_urls),
         "extract_top": extract_top,
         "succeeded": succeeded,
@@ -447,6 +711,7 @@ def run_batch(
         "stale": stale,
         "date_unknown": date_unknown,
         "duplicates_removed": duplicates_removed,
+        "filtered_authority": filtered_authority,
         "extract_queries": extract_queries,
         "extract_failures": extract_failures,
         "wall_ms": round(total_wall_ms, 1),

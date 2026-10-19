@@ -238,10 +238,17 @@ python3 "$PLUGIN_DIR/scripts/batch_search.py" \
 - Up to **12** concurrent queries; one retry per query; failure isolation.
 - `results` is keyed by query in input order; includes `wall_ms`, `spread_ms`
   (first-wave start spread), per-query latency, backend, `age_days`, `stale`,
-  `date_unknown`.
+  `date_unknown`, `date_source`.
+- URL date fallback: when the provider has no `date`, `/YYYY-MM-DD/`,
+  `/YYYY-MM/DD/`, `/YYYY/MM/DD/`, `/a/YYYYMMDD...`, and `/pYYYYMMDD...` are
+  parsed from the URL and marked `date_source: "url"`.
+- `--dedupe-urls` normalizes URLs (fragment + tracking params) before dedupe.
+- `--min-authority` / `--require-authority` filter by DeepSeek authority (0–4).
+- `--site`, `--lang`, `--after` append DeepSeek query operators; `--sort
+  relevance|date|authority` reorders the returned hits.
+- `--extract-top N` adds `content` for the top N hits per query.
 - Profiles: `general` (6 results, 7 days), `news` (8 results, 3 days),
   `research` (5 results, 30 days, top-2 extract).
-- `--extract-top N` adds `content` for the top N hits per query.
 - Structured data (quotes, announcements, LHB) should still use direct collectors;
   the batch CLI is for news/qualitative queries.
 

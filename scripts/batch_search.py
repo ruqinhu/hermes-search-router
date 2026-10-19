@@ -46,10 +46,21 @@ _load_package()
 from hsr.batch import (  # noqa: E402
     BatchConfig,
     PROFILES,
+    build_query_suffix,
     resolve_profile,
     run_batch,
 )
 from hsr.provider import SearchRouterProvider  # noqa: E402
+
+
+def _authority_type(value: str) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError("authority must be an integer 0-4") from exc
+    if not 0 <= number <= 4:
+        raise argparse.ArgumentTypeError("authority must be between 0 and 4")
+    return number
 
 
 def _read_queries(args: argparse.Namespace) -> list[str]:
@@ -83,8 +94,12 @@ def _print_human(result: dict, *, profile: str) -> None:
         "status: "
         f"succeeded={summary.get('succeeded')} failed={summary.get('failed')} "
         f"stale={summary.get('stale')} date_unknown={summary.get('date_unknown')} "
-        f"duplicates_removed={summary.get('duplicates_removed')}"
+        f"duplicates_removed={summary.get('duplicates_removed')} "
+        f"filtered_authority={summary.get('filtered_authority')} "
+        f"min_authority={summary.get('min_authority')} sort={summary.get('sort')}"
     )
+    if summary.get("query_suffix"):
+        print(f"suffix: {summary['query_suffix'].strip()}")
     for query, item in result.get("results", {}).items():
         if item.get("ok"):
             print(
@@ -97,6 +112,10 @@ def _print_human(result: dict, *, profile: str) -> None:
                 flags = []
                 if hit.get("date"):
                     flags.append(f"date={hit['date']}")
+                if hit.get("date_source") == "url":
+                    flags.append("date_from=url")
+                if hit.get("authority") is not None:
+                    flags.append(f"authority={hit['authority']}")
                 if hit.get("age_days") is not None:
                     flags.append(f"age={hit['age_days']}d")
                 if hit.get("stale"):
@@ -135,6 +154,32 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--extract-max-chars", type=int, default=4000, help="content chars kept"
     )
+    parser.add_argument(
+        "--min-authority",
+        type=_authority_type,
+        help="drop hits below this authority (0-4)",
+    )
+    parser.add_argument(
+        "--require-authority",
+        action="store_true",
+        help="also drop hits with no authority field",
+    )
+    parser.add_argument(
+        "--sort",
+        choices=["relevance", "date", "authority"],
+        default="relevance",
+        help="local hit order",
+    )
+    parser.add_argument(
+        "--site",
+        action="append",
+        default=[],
+        help="append site:domain to each query (repeatable)",
+    )
+    parser.add_argument("--lang", help="append lang:<code> to each query")
+    parser.add_argument(
+        "--after", help="append after:YYYY-MM-DD to each query"
+    )
     parser.add_argument("--out", help="write full JSON to this file")
     parser.add_argument("--json", action="store_true", help="print JSON")
     parser.add_argument(
@@ -160,6 +205,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.extract_top is not None
         else int(profile["extract_top"])
     )
+    try:
+        query_suffix = build_query_suffix(args.site, args.lang, args.after)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     config = BatchConfig(
         workers=args.workers,
@@ -169,6 +218,10 @@ def main(argv: list[str] | None = None) -> int:
         dedupe_urls=args.dedupe_urls,
         extract_top=extract_top,
         extract_max_chars=args.extract_max_chars,
+        min_authority=args.min_authority,
+        require_authority=args.require_authority,
+        sort=args.sort,
+        query_suffix=query_suffix,
     )
     provider = SearchRouterProvider(config_path=args.config)
     result = run_batch(provider, queries, config)

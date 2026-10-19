@@ -52,7 +52,13 @@ python3 batch_search.py --extract-top 1 "澜起科技 公告"
 | `--count` | profile | 每条查询结果数，夹到 1–50 |
 | `--retries` | 1 | 单条失败重试次数，夹到 0–3 |
 | `--max-age-days` | profile | 超过则标 `stale`；`news`=3，`general`=7 |
-| `--dedupe-urls` | 关 | 跨查询按 URL 去重，保留首次出现 |
+| `--dedupe-urls` | 关 | 跨查询按归一化 URL 去重，保留首次出现 |
+| `--min-authority` | 关 | 丢掉 authority 低于阈值的 hit（0–4） |
+| `--require-authority` | 关 | 连没有 authority 的 hit 也丢掉 |
+| `--sort` | `relevance` | `relevance` / `date` / `authority` |
+| `--site` | 关 | 给每条 query 追加 `site:domain`，可重复 |
+| `--lang` | 关 | 追加 `lang:zh` 等 |
+| `--after` | 关 | 追加 `after:YYYY-MM-DD` |
 | `--extract-top` | profile | 每条查询前 N 条抽正文；`research`=2 |
 | `--extract-max-chars` | 4000 | 正文截断 |
 | `--json` / `--out` | — | JSON 输出/落盘 |
@@ -66,20 +72,25 @@ python3 batch_search.py --extract-top 1 "澜起科技 公告"
   "summary": {
     "queries": 3, "workers": 6, "succeeded": 3, "failed": 0,
     "wall_ms": 4200, "search_wall_ms": 3800, "spread_ms": 12.4,
-    "stale": 1, "date_unknown": 2, "duplicates_removed": 0
+    "stale": 1, "date_unknown": 2, "duplicates_removed": 0,
+    "filtered_authority": 0, "min_authority": null, "sort": "relevance"
   },
   "results": {
     "澜起科技 公告": {
       "ok": true, "backend": "deepseek", "tries": 1, "elapsed_ms": 900,
       "stale_count": 0,
       "hits": [
-        {"title": "...", "url": "...", "date": "...", "age_days": 1.2,
-         "stale": false, "date_unknown": false, "backend": "deepseek"}
+        {"title": "...", "url": "...", "date": "...", "date_source": "field",
+         "age_days": 1.2, "stale": false, "date_unknown": false,
+         "authority": 4, "backend": "deepseek"}
       ]
     }
   }
 }
 ```
+
+- `date_source` 为 `field`（搜索结果自带）、`url`（URL 日期兜底）或 `null`。
+- URL 归一化去重会去掉 fragment、`utm_*`/`spm`/`scm`/`from` 等追踪参数；输出仍保留原 URL。
 
 - `results` 按输入查询顺序返回，不按完成顺序。
 - 单条失败只影响该 query，`ok=false` + `error`，其余照常。
@@ -90,17 +101,21 @@ python3 batch_search.py --extract-top 1 "澜起科技 公告"
 
 报告最容易犯的错：把旧闻当今日。`batch_search.py` 会为每条 hit 补：
 
-- `date`：DeepSeek 的发布时间；AnySearch 没有则为空。
+- `date`：DeepSeek 的发布时间；AnySearch 没有时，从 URL 日期兜底。
+- `date_source`：`field`（搜索结果自带）、`url`（URL 兜底）或 `null`。
 - `age_days`：相对当前 UTC 的天数。
 - `stale`：超过 `--max-age-days`。
-- `date_unknown`：没有日期或无法解析。
+- `date_unknown`：字段和 URL 都拿不到日期时为 true。
 
 建议：
 
 - 新闻/公告类 `--profile news`（3 天）；如果只写“今日”，把 `--max-age-days 1`。
-- 标题戏剧性（暴跌/暴涨/万亿/史诗级）时，先看 `date` / `stale` / URL 日期，再写入“今日”。
-- 新浪 URL 常见 `/YYYY-MM-DD/`；东财文章 URL 常见 `/a/YYYYMMDD...`；无日期的来源按“时间不明”处理。
-- `date_unknown=true` 不代表假，只代表不能证明是今日。
+- 标题戏剧性（暴跌/暴涨/万亿/史诗级）时，先看 `date` / `stale` / `date_source`，再写入“今日”。
+- URL 日期兜底覆盖：新浪 `/YYYY-MM-DD/`、上海证券报 `/YYYY-MM/DD/`、`/YYYY/MM/DD/`、
+  东财 `/a/YYYYMMDD...`、中财 `/pYYYYMMDD...`；`date_unknown=true` 不代表假，只代表
+  不能证明日期。
+- `--dedupe-urls` 用归一化 URL（去 fragment、`utm_*`/`spm`/`scm`/`from` 等追踪参数）
+  跨查询去重，能消掉同一篇研报的不同分享链接。
 
 ## 5. 源选择与降级
 
@@ -112,6 +127,13 @@ python3 batch_search.py --extract-top 1 "澜起科技 公告"
 - 百度/东财股吧/B站等反爬：**检测到拦截就直接换源**，不要反复换 UA/URL 重试。
 - 旧脚本 `concurrent_search.py` 仍是 AnySearch-only；需要 DeepSeek 质量时用
   `batch_search.py`。
+- 权威度：DeepSeek `authority` 0–4，`>=3` 为权威、`4` 为极权威。`--min-authority 3`
+  过滤低权威源；`--require-authority` 连缺字段的也丢。AnySearch 没有 authority，
+  默认保留。
+- 查询操作符：`--site cnstock.com`（可重复，多个用 OR）、`--lang zh`、
+  `--after 2026-10-17` 会拼成 DeepSeek 支持的 `site:... lang:zh after:...`；
+  AnySearch 回退可能按字面处理，报告里以 DeepSeek 结果为准。
+- `--sort authority|date` 只调整本地返回顺序，不会重新请求更多结果。
 
 ## 6. 报告集成示例
 
@@ -123,6 +145,19 @@ python3 ~/.hermes/plugins/web/search-router/scripts/batch_search.py \
   --profile news --workers 6 --dedupe-urls --json --out /tmp/news.json \
   "澜起科技 公告" "兆易创新 龙虎榜" "存储 涨价" "美股 隔夜 科技股"
 ```
+
+只想要权威源、并按权威度排序：
+
+```bash
+python3 ~/.hermes/plugins/web/search-router/scripts/batch_search.py \
+  --profile news --workers 4 --min-authority 3 --sort authority \
+  --site cnstock.com --site stcn.com --after 2026-10-15 --json \
+  "澜起科技 公告" "存储 涨价"
+```
+
+> `--site` / `--lang` / `--after` 拼的是 DeepSeek 查询语法；AnySearch 回退可能按字面
+> 处理，报告里以 DeepSeek 结果为准。`--min-authority` 只过滤已知 authority 的 hit；
+> 缺字段的 hit 默认保留，`--require-authority` 才丢弃。
 
 午报（12:40）热点补充：
 
