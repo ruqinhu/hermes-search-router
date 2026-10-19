@@ -34,9 +34,10 @@ hermes config set web.extract_backend search-router
 hermes config set web.backend search-router
 
 # 3. DeepSeek 需要 Key；AnySearch 匿名即可用。
-#    如果 ~/.hermes/.env 里已有 DEEPSEEK_API_KEY，跳过这步。
-grep -q '^DEEPSEEK_API_KEY=' ~/.hermes/.env || \
-  echo 'DEEPSEEK_API_KEY=sk-...' >> ~/.hermes/.env
+#    优先用 Hermes Key 存储：
+hermes config set DEEPSEEK_API_KEY 'sk-...'
+#    兜底方式（一定可用）：
+# echo 'DEEPSEEK_API_KEY=sk-...' >> ~/.hermes/.env
 
 # 4. 重启/重载 Hermes，然后在新会话里验证
 hermes plugins list | grep -i search-router

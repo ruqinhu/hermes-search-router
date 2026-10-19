@@ -34,9 +34,10 @@ hermes config set web.extract_backend search-router
 hermes config set web.backend search-router
 
 # 3. DeepSeek key: AnySearch works anonymously, DeepSeek needs a key.
-#    If DEEPSEEK_API_KEY is already in ~/.hermes/.env, skip this.
-grep -q '^DEEPSEEK_API_KEY=' ~/.hermes/.env || \
-  echo 'DEEPSEEK_API_KEY=sk-...' >> ~/.hermes/.env
+#    Preferred (Hermes key store):
+hermes config set DEEPSEEK_API_KEY 'sk-...'
+#    Fallback that always works:
+# echo 'DEEPSEEK_API_KEY=sk-...' >> ~/.hermes/.env
 
 # 4. Restart/reload Hermes once, then verify in a new session
 hermes plugins list | grep -i search-router
