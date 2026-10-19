@@ -221,6 +221,34 @@ DeepSeek Search/Fetch is free until **2026-11-01 00:00 Beijing time**, then bill
 successful request. DeepSeek is limited to 5 QPS per endpoint and account; the adapter
 uses a per-process 0.21s minimum interval.
 
+## Batch search for reports
+
+Reports often need several independent queries at once. Those calls are serial when
+issued through the `web_search` tool, so use the batch CLI for **4+ queries**:
+
+```bash
+PLUGIN_DIR=$(find ~/.hermes -maxdepth 5 -type d \
+  \( -name 'search-router' -o -name 'web-search-router' \) 2>/dev/null | head -1)
+
+python3 "$PLUGIN_DIR/scripts/batch_search.py" \
+  --profile news --workers 6 --dedupe-urls --json --out /tmp/report.json \
+  "澜起科技 公告" "存储 涨价" "美股 隔夜 科技股"
+```
+
+- Up to **12** concurrent queries; one retry per query; failure isolation.
+- `results` is keyed by query in input order; includes `wall_ms`, `spread_ms`
+  (first-wave start spread), per-query latency, backend, `age_days`, `stale`,
+  `date_unknown`.
+- Profiles: `general` (6 results, 7 days), `news` (8 results, 3 days),
+  `research` (5 results, 30 days, top-2 extract).
+- `--extract-top N` adds `content` for the top N hits per query.
+- Structured data (quotes, announcements, LHB) should still use direct collectors;
+  the batch CLI is for news/qualitative queries.
+
+See [`docs/REPORT_SEARCH_PLAYBOOK.md`](docs/REPORT_SEARCH_PLAYBOOK.md) for the
+morning/noon/evening report playbook, source selection, stale-news checks, and
+time budgets.
+
 ## Tests
 
 Offline; no network, no API key, no billing.

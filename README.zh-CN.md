@@ -215,6 +215,31 @@ python3 scripts/smoke.py --extract https://example.com/
 DeepSeek Search/Fetch 在 **2026-11-01 00:00（北京时间）前免费**，之后按成功请求计费。
 DeepSeek 每个 endpoint、每个账号限制 5 QPS；adapter 在进程内做 0.21 秒最小间隔。
 
+## 报告批量搜索
+
+早/午/晚报经常要一次查多条独立信息。工具层连续发 `web_search` 是串行的，**≥4 条**
+请用 batch CLI：
+
+```bash
+PLUGIN_DIR=$(find ~/.hermes -maxdepth 5 -type d \
+  \( -name 'search-router' -o -name 'web-search-router' \) 2>/dev/null | head -1)
+
+python3 "$PLUGIN_DIR/scripts/batch_search.py" \
+  --profile news --workers 6 --dedupe-urls --json --out /tmp/report.json \
+  "澜起科技 公告" "存储 涨价" "美股 隔夜 科技股"
+```
+
+- 最多 **12** 条并发；每条查询重试 1 次；失败隔离。
+- `results` 按输入顺序按 query 返回，带 `wall_ms`、`spread_ms`（第一波启动极差）、
+  单条耗时、`backend`、`age_days`、`stale`、`date_unknown`。
+- profile：`general`（6 条/7 天）、`news`（8 条/3 天）、
+  `research`（5 条/30 天，前 2 条抽正文）。
+- `--extract-top N` 为每条查询前 N 条追加 `content`。
+- 行情/公告/龙虎榜等结构化数据仍走直连采集；batch 只负责新闻/定性查询。
+
+完整早/午/晚报 playbook、源选择、旧闻校验和时间盒见
+[`docs/REPORT_SEARCH_PLAYBOOK.md`](docs/REPORT_SEARCH_PLAYBOOK.md)。
+
 ## 测试
 
 离线；不联网、不需要 Key、不产生费用。

@@ -1,0 +1,15 @@
+# One query per line. Lines starting with # and blank lines are ignored.
+# Use with:
+#   python3 scripts/batch_search.py --file examples/report_queries.txt \
+#     --profile news --workers 6 --dedupe-urls --json --out /tmp/report.json
+
+澜起科技 公告
+兆易创新 龙虎榜
+斯莱克 异动
+华丰科技 铜连接
+存储 涨价
+地产 政策 深圳
+美股 隔夜 科技股
+费城半导体 指数
+A50 期货
+隔夜 大宗商品
