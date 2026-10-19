@@ -105,6 +105,83 @@ def test_invalid_type_is_rejected():
         parse_config({"backends": {"local": {"type": "curl"}}})
 
 
+def test_shell_eval_command_is_rejected():
+    with pytest.raises(ConfigError, match="shell eval flag"):
+        parse_config(
+            {
+                "backends": {
+                    "local": {
+                        "type": "script",
+                        "command": ["bash", "-lc", "python search.py {query}"],
+                    }
+                }
+            }
+        )
+
+
+def test_interpreter_eval_command_is_rejected():
+    with pytest.raises(ConfigError, match="interpreter eval flag"):
+        parse_config(
+            {
+                "backends": {
+                    "local": {
+                        "type": "script",
+                        "command": ["python3", "-c", "print('{query}')"],
+                    }
+                }
+            }
+        )
+
+
+def test_shell_script_path_without_eval_flag_is_allowed():
+    config = parse_config(
+        {
+            "backends": {
+                "local": {
+                    "type": "script",
+                    "command": ["bash", "/tmp/search.sh", "{query}"],
+                }
+            }
+        }
+    )
+    assert config.backends["local"].command[0] == "bash"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["/usr/bin/env", "bash", "-c", "curl {query}"],
+        ["python3", "-uc", "print('{query}')"],
+        ["node", "--eval=console.log('{query}')"],
+        ["busybox", "sh", "-c", "wget {query}"],
+    ],
+)
+def test_wrapped_eval_commands_are_rejected(command):
+    with pytest.raises(ConfigError, match="eval flag"):
+        parse_config(
+            {
+                "backends": {
+                    "local": {"type": "script", "command": command},
+                }
+            }
+        )
+
+
+def test_env_passthrough_is_validated():
+    with pytest.raises(ConfigError, match="env_passthrough"):
+        parse_config(
+            {
+                "backends": {
+                    "local": {
+                        "type": "script",
+                        "command": ["/bin/true"],
+                        "env_passthrough": ["NOT-A-NAME"],
+                    }
+                }
+            }
+        )
+
+
 def test_on_empty_is_validated():
     with pytest.raises(ConfigError, match="on_empty"):
         parse_config(
@@ -141,6 +218,38 @@ def test_hot_reload_and_last_good_config(tmp_path):
         encoding="utf-8",
     )
     assert store.get().active == "anysearch"
+
+
+def test_invalid_utf8_config_raises(tmp_path):
+    path = tmp_path / "routes.yaml"
+    path.write_bytes(b"\xff\xfe\x00active: auto\n")
+    with pytest.raises(ConfigError, match="UTF-8"):
+        load_config(path)
+
+
+def test_malformed_file_after_missing_default_raises(tmp_path):
+    path = tmp_path / "routes.yaml"
+    store = ConfigStore(path)
+    assert store.get().active == "auto"  # synthesized default
+    time.sleep(0.02)
+    path.write_text("version: 1\nactive: nope\n", encoding="utf-8")
+    with pytest.raises(ConfigError):
+        store.get()
+
+
+def test_deleting_real_config_reverts_to_defaults(tmp_path):
+    path = tmp_path / "routes.yaml"
+    path.write_text(
+        "version: 1\nactive: anysearch\nbackends:\n"
+        "  deepseek: {type: deepseek}\n  anysearch: {type: anysearch}\n",
+        encoding="utf-8",
+    )
+    store = ConfigStore(path)
+    assert store.get().active == "anysearch"
+    path.unlink()
+    defaults = store.get()
+    assert defaults.active == "auto"
+    assert set(defaults.backends) == {"deepseek", "anysearch"}
 
 
 def test_store_without_cached_invalid_config_raises(tmp_path):

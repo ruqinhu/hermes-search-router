@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from typing import Any, Sequence
@@ -17,6 +18,7 @@ from .backends.base import (
     clamp_limit,
     extract_entry,
     truncate,
+    validate_url,
 )
 from .config import ConfigError, ConfigStore, RouteConfig
 from .factory import build_backend
@@ -26,6 +28,14 @@ logger = logging.getLogger(__name__)
 
 class SearchRouterProvider(WebSearchProvider):
     """One Hermes backend that routes to DeepSeek, AnySearch, or local scripts."""
+
+    _EXTRA_KEYS = frozenset(
+        {"rerank_score", "authority", "date", "site_name", "site_icon", "content"}
+    )
+    _HEALTH_RE = re.compile(
+        r"\b(?:401|402|429|5\d\d)\b|timeout|timed out|balance|rate limit",
+        re.IGNORECASE,
+    )
 
     def __init__(
         self,
@@ -117,6 +127,12 @@ class SearchRouterProvider(WebSearchProvider):
                 "success": False,
                 "error": f"search-router config error: {truncate(exc)}",
             }
+        except Exception as exc:  # noqa: BLE001 - never raise through provider
+            logger.warning("search-router config load failed: %s", exc)
+            return {
+                "success": False,
+                "error": f"search-router config error: {truncate(exc)}",
+            }
 
         try:
             backends = self._backends(config)
@@ -139,11 +155,14 @@ class SearchRouterProvider(WebSearchProvider):
 
         deadline = self._clock() + config.search_total_timeout
         attempts: list[str] = []
+        saw_empty = False
+        saw_failure = False
 
         for backend in chain:
+            backend_key = self._backend_key(backends, backend)
             remaining = deadline - self._clock()
             if remaining <= 0:
-                attempts.append(f"{backend.name}: total timeout")
+                attempts.append(f"{backend_key}: total timeout")
                 break
             timeout = max(
                 0.1,
@@ -161,14 +180,14 @@ class SearchRouterProvider(WebSearchProvider):
                 )
 
             if outcome.ok:
-                hits = self._normalize(outcome.hits, limit_value, backend.name)
+                hits = self._normalize(outcome.hits, limit_value, backend_key)
                 if hits:
                     logger.info(
                         "search-router: query_chars=%d limit=%d backend=%s hits=%d "
                         "attempts=%d",
                         len(query),
                         limit_value,
-                        backend.name,
+                        backend_key,
                         len(hits),
                         len(attempts) + 1,
                     )
@@ -177,22 +196,31 @@ class SearchRouterProvider(WebSearchProvider):
                     logger.info(
                         "search-router: query_chars=%d backend=%s empty (accepted)",
                         len(query),
-                        backend.name,
+                        backend_key,
                     )
                     return {"success": True, "data": {"web": []}}
-                attempts.append(f"{backend.name}: empty")
+                saw_empty = True
+                attempts.append(f"{backend_key}: empty")
                 continue
 
             attempts.append(
-                f"{backend.name}: {truncate(outcome.error or 'failed', 160)}"
+                f"{backend_key}: {truncate(outcome.error or 'failed', 160)}"
             )
-            self._mark_failure(backend.name, outcome)
+            saw_failure = True
+            self._mark_failure(backend_key, outcome)
+
+        # Empty is a successful search result, not a backend failure. Return
+        # empty only when no attempt failed; a later hard failure (for example
+        # a 429 on the fallback) must stay visible instead of being masked.
+        if saw_empty and not saw_failure:
+            logger.info("search-router: all candidates returned empty")
+            return {"success": True, "data": {"web": []}}
 
         error = "search-router: all backends failed"
         if attempts:
             error += ": " + "; ".join(attempts)
-        logger.warning("search-router: %s", truncate(error, 600))
-        return {"success": False, "error": truncate(error, 600)}
+        logger.warning("search-router: %s", truncate(error, 2000))
+        return {"success": False, "error": truncate(error, 300)}
 
     def extract(
         self, urls: Sequence[str], **kwargs: Any
@@ -210,6 +238,16 @@ class SearchRouterProvider(WebSearchProvider):
         try:
             config = self._store.get()
         except ConfigError as exc:
+            return [
+                extract_entry(
+                    url,
+                    error=f"search-router config error: {truncate(exc)}",
+                    backend=self.name,
+                )
+                for url in url_list
+            ]
+        except Exception as exc:  # noqa: BLE001 - never raise through provider
+            logger.warning("search-router config load failed: %s", exc)
             return [
                 extract_entry(
                     url,
@@ -244,56 +282,82 @@ class SearchRouterProvider(WebSearchProvider):
 
         deadline = self._clock() + config.extract_total_timeout
         attempts: list[str] = []
-        last_entries: list[dict[str, Any]] = []
+        chosen: dict[str, dict[str, Any]] = {}
+        last_by_url: dict[str, dict[str, Any]] = {}
 
         for backend in chain:
+            backend_key = self._backend_key(backends, backend)
+            pending = [url for url in url_list if url not in chosen]
+            if not pending:
+                break
             remaining = deadline - self._clock()
             if remaining <= 0:
-                attempts.append(f"{backend.name}: total timeout")
+                attempts.append(f"{backend_key}: total timeout")
                 break
-            timeout = max(
-                0.1,
-                min(
-                    float(getattr(backend, "timeout", config.extract_total_timeout)),
-                    remaining,
-                ),
-            )
+            # extract() receives the total budget for this backend; the
+            # adapter itself caps each HTTP request at its own timeout.
+            timeout = max(0.1, remaining)
             try:
-                raw_entries = backend.extract(url_list, timeout=timeout)
+                raw_entries = backend.extract(pending, timeout=timeout)
             except Exception as exc:  # noqa: BLE001
                 attempts.append(
-                    f"{backend.name}: {truncate(type(exc).__name__ + ': ' + str(exc), 160)}"
+                    f"{backend_key}: "
+                    f"{truncate(type(exc).__name__ + ': ' + str(exc), 160)}"
                 )
+                self._set_cooldown(backend_key, config.cooldown_seconds)
                 continue
 
             if isinstance(raw_entries, dict):
                 raw_entries = raw_entries.get("data")
             if not isinstance(raw_entries, list):
-                attempts.append(f"{backend.name}: invalid extract result")
+                attempts.append(f"{backend_key}: invalid extract result")
                 continue
 
-            entries = self._ensure_entries(url_list, raw_entries, backend.name)
-            content_count = sum(
-                1
-                for entry in entries
-                if entry.get("content") and not entry.get("error")
+            entries = self._ensure_entries(pending, raw_entries, backend_key)
+            backend_errors: list[str] = []
+            for entry in entries:
+                url = str(entry.get("url") or "")
+                if entry.get("content") and not entry.get("error"):
+                    chosen[url] = entry
+                else:
+                    last_by_url[url] = entry
+                    if entry.get("error"):
+                        backend_errors.append(str(entry["error"]))
+
+            if self._looks_like_health_error(" ".join(backend_errors)):
+                self._set_cooldown(backend_key, config.cooldown_seconds)
+            logger.info(
+                "search-router extract: pending=%d backend=%s content=%d attempts=%d",
+                len(pending),
+                backend_key,
+                sum(1 for url in url_list if url in chosen),
+                len(attempts) + 1,
             )
-            if content_count:
-                logger.info(
-                    "search-router extract: urls=%d backend=%s content=%d attempts=%d",
-                    len(url_list),
-                    backend.name,
-                    content_count,
-                    len(attempts) + 1,
+            attempts.append(f"{backend_key}: no content")
+
+        ordered: list[dict[str, Any]] = []
+        for url in url_list:
+            if url in chosen:
+                ordered.append(chosen[url])
+                continue
+            entry = last_by_url.get(url)
+            if entry is None:
+                ordered.append(
+                    extract_entry(
+                        url,
+                        error=f"{self.name}: no entry returned",
+                        backend=self.name,
+                    )
                 )
-                return entries
+                continue
+            if not entry.get("content") and not entry.get("error"):
+                entry["error"] = "search-router: extract returned empty content"
+            ordered.append(entry)
 
-            attempts.append(f"{backend.name}: no content")
-            last_entries = entries
-
-        if last_entries:
-            return last_entries
-
+        if chosen:
+            return ordered
+        if ordered:
+            return ordered
         return [
             extract_entry(
                 url,
@@ -324,6 +388,9 @@ class SearchRouterProvider(WebSearchProvider):
                     )
             self._cached_config = config
             self._cached_backends = built
+            # A config reload may be how the operator fixes a bad key or base
+            # URL. Do not keep a stale 401/402 cooldown for the rebuilt backend.
+            self._cooldowns.clear()
             return built
 
     def _chain(
@@ -391,6 +458,8 @@ class SearchRouterProvider(WebSearchProvider):
             url = (url or "").strip()
             if not url or url in seen:
                 continue
+            if validate_url(url):
+                continue
             seen.add(url)
 
             item: dict[str, Any] = {
@@ -400,13 +469,28 @@ class SearchRouterProvider(WebSearchProvider):
                 "position": len(normalized) + 1,
             }
             for key, value in (extra or {}).items():
-                if key not in item and value is not None:
+                if (
+                    key in self._EXTRA_KEYS
+                    and key not in item
+                    and value is not None
+                ):
                     item[key] = value
-            item["backend"] = (extra or {}).get("backend") or backend_name
+            item["backend"] = backend_name
             normalized.append(item)
             if len(normalized) >= cap:
                 break
         return normalized
+
+    @staticmethod
+    def _backend_key(backends: dict[str, Any], backend: Any) -> str:
+        for name, candidate in backends.items():
+            if candidate is backend:
+                return name
+        return str(getattr(backend, "name", "backend"))
+
+    @classmethod
+    def _looks_like_health_error(cls, text: str) -> bool:
+        return bool(cls._HEALTH_RE.search(text or ""))
 
     @staticmethod
     def _ensure_entries(
@@ -435,8 +519,10 @@ class SearchRouterProvider(WebSearchProvider):
             metadata = entry.get("metadata")
             if not isinstance(metadata, dict):
                 metadata = {}
-            metadata.setdefault("sourceURL", url)
-            metadata.setdefault("backend", backend_name)
+            # Provider metadata is not trusted for provenance: a backend must
+            # not be able to spoof another backend or URL.
+            metadata["sourceURL"] = url
+            metadata["backend"] = backend_name
             entry["metadata"] = metadata
             entry.setdefault("raw_content", entry.get("content", ""))
             ordered.append(entry)
@@ -448,7 +534,10 @@ class SearchRouterProvider(WebSearchProvider):
         seconds = outcome.cooldown
         if seconds is None:
             return
-        if seconds > 0:
+        self._set_cooldown(name, seconds)
+
+    def _set_cooldown(self, name: str, seconds: float) -> None:
+        if seconds and seconds > 0:
             with self._lock:
                 self._cooldowns[name] = self._clock() + float(seconds)
 

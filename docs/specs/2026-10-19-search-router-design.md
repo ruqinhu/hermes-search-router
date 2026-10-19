@@ -96,6 +96,9 @@ backends:
     mode: canonical
     command: ["python3", "/root/.hermes/scripts/local_news.py"]
     timeout: 20
+    # optional:
+    # cwd: /root/.hermes/scripts
+    # max_output_bytes: 1048576
   byted:
     type: script
     mode: argv
@@ -105,6 +108,7 @@ backends:
     output: json
     results_path: data.results
     fields: {title: title, url: url, description: snippet}
+    env_passthrough: [WEB_SEARCH_API_KEY]
     timeout: 30
 ```
 
@@ -208,15 +212,21 @@ Argv mode:
 Security and limits:
 
 - `subprocess` list, `shell=False`; query is one argv element or JSON stdin, never shell text.
-- timeout kills the child; output capped (default 1 MB).
-- scripts are admin-configured in `routes.yaml`; v1 is search-only (`supports_extract` ignored).
+- Shell/eval flags (`bash -c`, `python -c`, `node -e`, ...) are rejected at config load;
+  placeholders are substituted in a single pass so a query containing `{limit}` is not
+  rewritten.
+- Timeout kills the process group/tree, not only the direct child; stdout and stderr are
+  read incrementally and capped per stream (default 1 MB each).
+- The child receives a minimal environment (PATH/HOME/LANG/temp); additional variables
+  must be listed in `env_passthrough`. Gateway API keys are not inherited by default.
+- scripts are admin-configured in `routes.yaml`; v1 is search-only.
 
 ## 9. Error handling and limits
 
 - No backend ever raises through the provider; all failures become envelopes/entries.
 - Error text truncated to 300 chars; never log keys, Authorization headers, or full pages.
-- Cooldown: process-local; set on failure. Default 60s; 429/5xx 60–120s; 401/402 3600s.
-- DeepSeek rate limit: 5 QPS per endpoint, per process. AnySearch: no client-side limiter.
+- Cooldown: process-local; set on failure. Default 60s; 429/5xx 60–120s; 401/402 3600s;
+  403 uses the 60s default.- DeepSeek rate limit: 5 QPS per endpoint, per process. AnySearch: no client-side limiter.
 - Total deadlines: search 45s, extract 100s (configurable).
 
 ## 10. Hermes integration
@@ -235,7 +245,9 @@ plugins:
     - web/search-router
 ```
 
-- Plugin directory: `~/.hermes/plugins/web/search-router/`
+- Plugin directory: `~/.hermes/plugins/web/search-router/` (manual nested install);
+  `hermes plugins install ruqinhu/hermes-search-router --enable` may install it top-level
+  as `web-search-router` instead.
 - Provider name: `search-router`
 - Manifest: `kind: backend`, `provides_web_providers: [search-router]`
 - No `requires_env`; availability is computed from configured backends.

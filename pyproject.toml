@@ -1,3 +1,7 @@
+# Hermes directory plugin, not a pip package. The Hermes runtime provides
+# httpx and PyYAML; dependencies are intentionally not declared here. This file
+# only configures pytest for the offline test suite.
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

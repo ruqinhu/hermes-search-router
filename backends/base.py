@@ -133,6 +133,8 @@ def validate_query(
             None,
             f"query is too long ({len(clean)} > {max_chars} characters); shorten it",
         )
+    if any(ord(char) < 32 or ord(char) == 127 for char in clean):
+        return None, "query contains control characters"
     return clean, None
 
 
@@ -144,6 +146,8 @@ def validate_url(url: Any) -> str | None:
         return "url must not be blank"
     if len(value) > MAX_URL_CHARS:
         return f"url is too long (> {MAX_URL_CHARS} characters)"
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        return "url contains control characters"
     try:
         parts = urlsplit(value)
     except ValueError as exc:

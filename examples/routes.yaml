@@ -49,6 +49,7 @@ backends:
   #   output: json
   #   results_path: results
   #   fields: {title: title, url: url, description: snippet}
+  #   env_passthrough: [WEB_SEARCH_API_KEY]
   #   timeout: 30
 
   # AnySearch's own CLI emits {"code": 0, "data": {"results": [...]}}.

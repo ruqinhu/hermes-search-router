@@ -41,6 +41,8 @@ hermes config set DEEPSEEK_API_KEY 'sk-...'
 
 # 4. Restart/reload Hermes once, then verify in a new session
 hermes plugins list | grep -i search-router
+hermes plugins show web-search-router 2>/dev/null || \
+  hermes plugins show web/search-router
 hermes tools
 ```
 
@@ -52,12 +54,18 @@ or a different order.
 > **admin-configured** local scripts. The scripts are listed in `routes.yaml`; the model
 > cannot supply commands. Review the prompt, then allow the install.
 
+Install layout can differ by Hermes version: a GitHub install may land as
+`web-search-router` (top level), while a manual copy lives at
+`plugins/web/search-router` (`web/search-router`). The provider name is always
+`search-router`. If `hermes plugins list` does not show it, use the manual install below.
+
 Optional self-check after install:
 
 ```bash
 PLUGIN_DIR=$(find ~/.hermes -maxdepth 5 -type d \
   \( -name 'search-router' -o -name 'web-search-router' \) 2>/dev/null | head -1)
-python3 "$PLUGIN_DIR/scripts/selfcheck.py"
+python3 "$PLUGIN_DIR/scripts/contract_check.py"   # checks the real Hermes ABC
+python3 "$PLUGIN_DIR/scripts/selfcheck.py"       # config/env/availability
 # live calls (may cost quota):
 python3 "$PLUGIN_DIR/scripts/smoke.py"
 ```
@@ -102,10 +110,17 @@ backends:
     mode: canonical
     command: ["python3", "/root/.hermes/scripts/local_news.py"]
     timeout: 20
+    # optional:
+    # cwd: /root/.hermes/scripts
+    # max_output_bytes: 1048576
 ```
 
 If the file is missing, the router uses DeepSeek + AnySearch, `active: auto`, and
 `on_empty: fallback`. See [`examples/routes.yaml`](examples/routes.yaml) for a full example.
+
+Naming: the GitHub repo is `hermes-search-router`, the manifest is `web-search-router`,
+the Hermes provider name is `search-router`, and a manual nested install lives at
+`~/.hermes/plugins/web/search-router/` (enabled as `web/search-router`).
 
 ### Manual switching
 
@@ -161,6 +176,8 @@ byted:
   output: json
   results_path: results
   fields: {title: title, url: url, description: snippet}
+  # Only these named vars are passed to the child (plus PATH/HOME/LANG/TMPDIR).
+  env_passthrough: [WEB_SEARCH_API_KEY]
   timeout: 30
 ```
 
@@ -173,8 +190,13 @@ byted:
 - Commands come from `routes.yaml` (admin-owned), never from the model.
 - `subprocess` is called with a list and `shell=False`.
 - The query is one argv element or JSON stdin; `; rm -rf` is not interpreted.
-- Timeout kills the child; stdout is capped (default 1 MB).
-- Scripts inherit the gateway environment, including API keys. Only run scripts you trust.
+- Shell/eval flags (`bash -c`, `python -c`, `node -e`, ...) are rejected at config
+  load; use a script file and argv placeholders.
+- Timeout kills the process tree; stdout and stderr are capped (1 MB each).
+- Scripts get a minimal environment by default (`PATH`, `HOME`, `LANG`, temp dirs).
+  Add `env_passthrough: [VAR_NAME]` to pass specific variables. Scripts do **not**
+  inherit the gateway's API keys by default.
+- Scripts are admin-configured; only run scripts you trust.
 - v1 scripts are search-only; `extract` returns a per-URL "search only" error.
 
 ## Self-check and smoke
@@ -214,32 +236,44 @@ python3 -m pytest -q
 
 ## Rollback
 
-Keep the existing AnySearch plugin enabled. To go back:
+Keep the existing AnySearch plugin enabled. To go back, change the config **first**:
 
 ```bash
+hermes plugins list | grep -i anysearch          # confirm the fallback exists
 hermes config set web.search_backend anysearch
 hermes config set web.extract_backend anysearch
 hermes config set web.backend anysearch
 ```
 
-The change applies to the next call. To remove the router entirely:
+The change applies to the next call; run one search to verify before disabling the router:
 
 ```bash
-hermes plugins disable web-search-router   # or: hermes plugins disable web/search-router
+hermes plugins disable web/search-router         # manual nested install
+# or: hermes plugins disable web-search-router   # top-level GitHub install
 ```
+
+Do not disable the router while `web.*` still points at `search-router`: every web call
+would fail until the config is fixed.
 
 ## Manual install (fallback)
 
-If your Hermes version cannot install from GitHub, copy the directory manually:
+If your Hermes version cannot install from GitHub, or the installed layout is not
+discovered, copy the directory manually:
 
 ```bash
 scp -r hermes-search-router root@HOST:/root/.hermes/plugins/web/search-router
 ssh root@HOST
-hermes plugins enable web/search-router
+hermes plugins doctor /root/.hermes/plugins/web/search-router --ci
+hermes plugins enable web/search-router --no-allow-tool-override
+hermes plugins list | grep -i search-router
 hermes config set web.search_backend search-router
 hermes config set web.extract_backend search-router
 hermes config set web.backend search-router
 ```
+
+The manual copy bypasses the install-time security scan; `hermes plugins doctor` is the
+real gate. `--no-allow-tool-override` is correct because this plugin registers a backend,
+not a replacement `web_search` tool.
 
 `web.search_backend` / `web.extract_backend` are read per call. `routes.yaml` is also
 re-read per call (mtime + size), so switching or editing routes does **not** need a
@@ -254,8 +288,13 @@ the gateway process is blocked.
 
 - Target: Hermes Agent 0.20.5 (Python 3.11). Uses the public `WebSearchProvider` ABC;
   no core patches.
-- `extract()` returns a bare list, matching the bundled provider behavior. If a future
-  Hermes version requires `{"success": true, "data": [...]}`, wrap the return value.
+- `extract()` returns a bare list. Verified against the 0.20.5 dispatcher in
+  `tools/web_tools.py`, which iterates the list and checks `error` per entry. The
+  top-of-file ABC docstring still shows an envelope; the method contract is the list.
+- DeepSeek query is limited to 128 Unicode characters; control characters are rejected.
+- `DEEPSEEK_BASE_URL` / `ANYSEARCH_URL` overrides are restricted to the official
+  hosts (HTTPS, default port). Loopback overrides require
+  `SEARCH_ROUTER_ALLOW_LOOPBACK=1` (tests/dev only).
 - No fan-out, merge/RRF, LLM routing, or result cache in v1.
 - No script extract in v1.
 - Cooldowns are process-local; restarting Hermes clears them.

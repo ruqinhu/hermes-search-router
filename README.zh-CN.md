@@ -41,6 +41,8 @@ hermes config set DEEPSEEK_API_KEY 'sk-...'
 
 # 4. 重启/重载 Hermes，然后在新会话里验证
 hermes plugins list | grep -i search-router
+hermes plugins show web-search-router 2>/dev/null || \
+  hermes plugins show web/search-router
 hermes tools
 ```
 
@@ -50,12 +52,17 @@ hermes tools
 > `hermes plugins install` 可能弹出安全扫描提示，因为这个插件可以执行**管理员配置**的
 > 本地脚本。脚本只来自 `routes.yaml`，模型不能传入命令。确认内容后再允许安装。
 
+安装布局可能因 Hermes 版本不同：GitHub 安装可能落在顶层 `web-search-router`，而手动
+复制会落在 `plugins/web/search-router`（`web/search-router`）。provider 名始终是
+`search-router`。如果 `hermes plugins list` 看不到它，用下面的手动安装。
+
 安装后可做一次自检：
 
 ```bash
 PLUGIN_DIR=$(find ~/.hermes -maxdepth 5 -type d \
   \( -name 'search-router' -o -name 'web-search-router' \) 2>/dev/null | head -1)
-python3 "$PLUGIN_DIR/scripts/selfcheck.py"
+python3 "$PLUGIN_DIR/scripts/contract_check.py"   # 校验真实 Hermes ABC
+python3 "$PLUGIN_DIR/scripts/selfcheck.py"        # 配置/环境/可用性
 # 真实调用（会消耗额度）：
 python3 "$PLUGIN_DIR/scripts/smoke.py"
 ```
@@ -99,10 +106,17 @@ backends:
     mode: canonical
     command: ["python3", "/root/.hermes/scripts/local_news.py"]
     timeout: 20
+    # 可选：
+    # cwd: /root/.hermes/scripts
+    # max_output_bytes: 1048576
 ```
 
 文件不存在时，默认使用 DeepSeek + AnySearch、`active: auto`、`on_empty: fallback`。
 完整示例见 [`examples/routes.yaml`](examples/routes.yaml)。
+
+命名：GitHub 仓库是 `hermes-search-router`，manifest 是 `web-search-router`，Hermes
+provider 名是 `search-router`；手动嵌套安装目录是 `~/.hermes/plugins/web/search-router/`
+（启用名 `web/search-router`）。
 
 ### 手动切换
 
@@ -158,6 +172,8 @@ byted:
   output: json
   results_path: results
   fields: {title: title, url: url, description: snippet}
+  # 只把这些具名变量传给子进程（另加 PATH/HOME/LANG/TMPDIR）。
+  env_passthrough: [WEB_SEARCH_API_KEY]
   timeout: 30
 ```
 
@@ -170,8 +186,12 @@ byted:
 - 命令只来自 `routes.yaml`（管理员维护），不来自模型。
 - `subprocess` 用 list 调用，`shell=False`。
 - query 是一个 argv 元素或 JSON stdin；`; rm -rf` 不会被解释。
-- 超时会杀掉子进程；stdout 有大小上限（默认 1 MB）。
-- 脚本继承 gateway 环境变量，包括 API Key；只运行你信任的脚本。
+- 配置加载时会拒绝 shell/eval 参数（`bash -c`、`python -c`、`node -e` 等）；
+  请用脚本文件 + argv 占位符。
+- 超时会杀掉整个进程树；stdout/stderr 各有大小上限（默认各 1 MB）。
+- 脚本默认只拿到最小环境（`PATH`、`HOME`、`LANG`、临时目录）。需要额外变量时用
+  `env_passthrough: [VAR_NAME]` 显式放行；脚本**默认不会**继承 gateway 的 API Key。
+- 脚本由管理员配置；只运行你信任的脚本。
 - v1 脚本只支持 search；extract 会返回每条 URL 的 "search only" 错误。
 
 ## 自检与冒烟
@@ -210,32 +230,42 @@ python3 -m pytest -q
 
 ## 回滚
 
-保留 AnySearch 插件，随时可以切回：
+保留 AnySearch 插件。回退时**先改配置**：
 
 ```bash
+hermes plugins list | grep -i anysearch          # 确认回退后端存在
 hermes config set web.search_backend anysearch
 hermes config set web.extract_backend anysearch
 hermes config set web.backend anysearch
 ```
 
-下一次调用生效。彻底移除 router：
+下一次调用生效；先跑一次搜索确认，再禁用 router：
 
 ```bash
-hermes plugins disable web-search-router   # 或：hermes plugins disable web/search-router
+hermes plugins disable web/search-router         # 手动嵌套安装
+# 或：hermes plugins disable web-search-router   # GitHub 顶层安装
 ```
+
+不要在 `web.*` 还指向 `search-router` 时禁用 router：否则所有 web 调用都会失败，直到
+配置改回来。
 
 ## 手动安装（备选）
 
-如果当前 Hermes 版本不支持从 GitHub 安装，可以手动复制：
+如果当前 Hermes 版本不支持从 GitHub 安装，或者安装后没有被发现，可以手动复制：
 
 ```bash
 scp -r hermes-search-router root@HOST:/root/.hermes/plugins/web/search-router
 ssh root@HOST
-hermes plugins enable web/search-router
+hermes plugins doctor /root/.hermes/plugins/web/search-router --ci
+hermes plugins enable web/search-router --no-allow-tool-override
+hermes plugins list | grep -i search-router
 hermes config set web.search_backend search-router
 hermes config set web.extract_backend search-router
 hermes config set web.backend search-router
 ```
+
+手动复制绕过安装时的安全扫描；真正的门槛是 `hermes plugins doctor`。这里用
+`--no-allow-tool-override`，因为插件只注册 backend，不替换内置 `web_search` 工具。
 
 `web.search_backend` / `web.extract_backend` 每次调用都会重新读取。`routes.yaml` 也按
 mtime + size 热加载；插件加载后，切换或修改路由**不需要**重启 gateway。
@@ -248,8 +278,12 @@ mtime + size 热加载；插件加载后，切换或修改路由**不需要**重
 
 - 目标：Hermes Agent 0.20.5（Python 3.11）。只使用公开的 `WebSearchProvider` ABC，
   不改核心。
-- `extract()` 返回裸 list，与 bundled provider 行为一致。如果未来 Hermes 改成要求
-  `{"success": true, "data": [...]}`，在返回处包一层即可。
+- `extract()` 返回裸 list。已对照 0.20.5 的 `tools/web_tools.py` dispatcher 验证：它
+  直接遍历 list 并检查每条 `error`。ABC 文件顶部的注释仍写着 envelope，但方法契约是
+  list。
+- DeepSeek query 限制 128 个 Unicode 字符；控制字符会被拒绝。
+- `DEEPSEEK_BASE_URL` / `ANYSEARCH_URL` 只允许官方 host（HTTPS、默认端口）。
+  loopback 覆盖需要设置 `SEARCH_ROUTER_ALLOW_LOOPBACK=1`（仅测试/开发）。
 - v1 不做 fan-out、merge/RRF、LLM 路由或结果缓存。
 - v1 脚本不支持 extract。
 - 冷却状态是进程内的；重启 Hermes 会清空。

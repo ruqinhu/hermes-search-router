@@ -20,6 +20,40 @@ KNOWN_TYPES = {"deepseek", "anysearch", "script"}
 SCRIPT_MODES = {"canonical", "argv"}
 ON_EMPTY_VALUES = {"fallback", "accept"}
 
+# A command template is admin-owned, but placeholders make shell/eval flags a
+# query-injection path. Reject the common ones at config load; use a script
+# file plus argv placeholders instead.
+_SHELL_BASENAMES = {
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "ksh",
+    "cmd",
+    "cmd.exe",
+    "powershell",
+    "powershell.exe",
+    "pwsh",
+    "pwsh.exe",
+}
+_SHELL_EVAL_FLAGS = {"-c", "-lc", "-ic", "-cl", "/c", "-command", "-commandwithargs"}
+_INTERPRETER_BASENAMES = {
+    "python",
+    "python3",
+    "python.exe",
+    "python3.exe",
+    "node",
+    "node.exe",
+    "perl",
+    "perl.exe",
+    "ruby",
+    "ruby.exe",
+    "php",
+    "php.exe",
+}
+_INTERPRETER_EVAL_FLAGS = {"-c", "-e", "-r", "--eval", "-p", "--print"}
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 
 class ConfigError(ValueError):
     """Invalid or unreadable route configuration."""
@@ -39,7 +73,7 @@ class BackendConfig:
     fields: dict[str, str] = field(default_factory=dict)
     cwd: str | None = None
     max_output_bytes: int = 1_000_000
-    supports_extract: bool = False
+    env_passthrough: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -96,6 +130,8 @@ def load_config(path: str | Path | None = None) -> RouteConfig:
         return default_config()
     try:
         text = config_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise ConfigError(f"{config_path} is not valid UTF-8: {exc}") from exc
     except OSError as exc:
         raise ConfigError(f"cannot read {config_path}: {exc}") from exc
     try:
@@ -209,6 +245,7 @@ def _parse_backend(
     command = tuple(os.path.expanduser(str(part)) for part in command_raw)
     if not command[0].strip():
         raise ConfigError(f"backends.{name}.command[0] must not be blank")
+    _validate_command_safety(command, name)
 
     output = str(raw.get("output", "json")).strip().lower()
     if output != "json":
@@ -237,13 +274,20 @@ def _parse_backend(
     max_output_bytes = _positive_int(
         raw.get("max_output_bytes"), 1_000_000, f"backends.{name}.max_output_bytes"
     )
-    supports_extract = _as_bool(raw.get("supports_extract"), False)
-    if supports_extract:
-        logger.warning(
-            "search-router: backends.%s.supports_extract is ignored in v1 "
-            "(scripts are search-only)",
-            name,
+    env_passthrough_raw = raw.get("env_passthrough") or []
+    if not isinstance(env_passthrough_raw, (list, tuple)):
+        raise ConfigError(
+            f"backends.{name}.env_passthrough must be a list of variable names"
         )
+    env_passthrough: list[str] = []
+    for item in env_passthrough_raw:
+        env_name = str(item).strip()
+        if not _ENV_NAME_RE.match(env_name):
+            raise ConfigError(
+                f"backends.{name}.env_passthrough has invalid name {item!r}"
+            )
+        if env_name not in env_passthrough:
+            env_passthrough.append(env_name)
 
     return BackendConfig(
         name=name,
@@ -256,8 +300,80 @@ def _parse_backend(
         fields=fields,
         cwd=cwd,
         max_output_bytes=max_output_bytes,
-        supports_extract=False,
+        env_passthrough=tuple(env_passthrough),
     )
+
+
+def _effective_command(command: tuple[str, ...]) -> list[str]:
+    """Unwrap env/busybox so the safety check sees the real program."""
+
+    args = list(command)
+    while args:
+        executable = Path(args[0]).name.lower()
+        if executable in {"env", "env.exe"}:
+            args = args[1:]
+            while args and (
+                args[0].startswith("-")
+                or ("=" in args[0] and not args[0].startswith("/"))
+            ):
+                args = args[1:]
+            continue
+        if executable in {"busybox", "busybox.exe"}:
+            args = args[1:]
+            continue
+        break
+    return args
+
+
+def _validate_command_safety(command: tuple[str, ...], name: str) -> None:
+    effective = _effective_command(command)
+    if not effective:
+        raise ConfigError(
+            f"backends.{name}.command resolves to an empty program"
+        )
+    executable = Path(effective[0]).name.lower()
+    args = [part.lower() for part in effective[1:]]
+
+    if executable in _SHELL_BASENAMES:
+        bad = next(
+            (
+                arg
+                for arg in args
+                if arg in _SHELL_EVAL_FLAGS
+                or (
+                    arg.startswith("-")
+                    and not arg.startswith("--")
+                    and "c" in arg[1:]
+                )
+            ),
+            None,
+        )
+        if bad:
+            raise ConfigError(
+                f"backends.{name}.command uses a shell eval flag ({bad!r}); "
+                "use a script path and argv placeholders instead"
+            )
+    if executable in _INTERPRETER_BASENAMES:
+        bad = next(
+            (
+                arg
+                for arg in args
+                if arg in _INTERPRETER_EVAL_FLAGS
+                or arg.startswith("--eval=")
+                or arg.startswith("--print=")
+                or (
+                    arg.startswith("-")
+                    and not arg.startswith("--")
+                    and any(ch in arg[1:] for ch in "cerp")
+                )
+            ),
+            None,
+        )
+        if bad:
+            raise ConfigError(
+                f"backends.{name}.command uses an interpreter eval flag "
+                f"({bad!r}); use a script file and argv placeholders instead"
+            )
 
 
 def _parse_fallback(
@@ -333,16 +449,6 @@ def _positive_int(value: Any, default: int, field_name: str) -> int:
     return number
 
 
-def _as_bool(value: Any, default: bool) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
-
-
 def _validate_dotted_path(path: str, field_name: str) -> None:
     if not path or any(not part for part in path.split(".")):
         raise ConfigError(f"{field_name} must be a non-empty dotted path")
@@ -361,18 +467,21 @@ class ConfigStore:
         self._lock = threading.Lock()
         self._cached: RouteConfig | None = None
         self._key: tuple[int, int] | None = None
+        self._bad_key: tuple[int, int] | None = None
         self._missing = False
+        self._synthetic = False
 
     def get(self) -> RouteConfig:
         with self._lock:
             try:
                 stat = self.path.stat()
             except FileNotFoundError:
-                if self._cached is not None:
+                if self._cached is not None and self._synthetic:
                     return self._cached
                 config = default_config()
                 self._cached = config
                 self._missing = True
+                self._synthetic = True
                 self._key = None
                 self.last_error = None
                 return config
@@ -385,12 +494,22 @@ class ConfigStore:
             key = (stat.st_mtime_ns, stat.st_size)
             if self._cached is not None and key == self._key and not self._missing:
                 return self._cached
+            if (
+                self._cached is not None
+                and key == self._bad_key
+                and not self._synthetic
+            ):
+                return self._cached
 
             try:
                 config = load_config(self.path)
             except ConfigError as exc:
                 self.last_error = str(exc)
-                if self._cached is not None:
+                # A synthesized default is not a "last good" file. If the user
+                # has now created a malformed routes.yaml, surface the error
+                # instead of silently pretending the defaults were reviewed.
+                if self._cached is not None and not self._synthetic:
+                    self._bad_key = key
                     logger.warning(
                         "search-router: %s; keeping last good config", exc
                     )
@@ -399,6 +518,8 @@ class ConfigStore:
 
             self._cached = config
             self._key = key
+            self._bad_key = None
             self._missing = False
+            self._synthetic = False
             self.last_error = None
             return config

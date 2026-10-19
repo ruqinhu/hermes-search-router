@@ -40,7 +40,7 @@ class FakeBackend:
         )
 
     def extract(self, urls, timeout=None, **kwargs):
-        self.extract_calls.append(list(urls))
+        self.extract_calls.append({"urls": list(urls), "timeout": timeout})
         if self._extract_fn is not None:
             return self._extract_fn(urls)
         return [
@@ -137,6 +137,149 @@ def test_empty_results_can_be_accepted(tmp_path):
     assert result["success"] is True
     assert result["data"]["web"] == []
     assert b.search_calls == []
+
+
+def test_all_empty_results_return_success_not_failure(tmp_path):
+    a = FakeBackend("a", search_fn=lambda q, n: SearchOutcome.success([]))
+    b = FakeBackend("b", search_fn=lambda q, n: SearchOutcome.success([]))
+    provider = make_provider(tmp_path, {"a": a, "b": b}, on_empty="fallback")
+    result = provider.search("q", 5)
+    assert result["success"] is True
+    assert result["data"]["web"] == []
+    assert len(a.search_calls) == 1
+    assert len(b.search_calls) == 1
+
+
+def test_alias_backend_key_is_used_for_hits_and_cooldown(tmp_path):
+    now = [0.0]
+    alias = FakeBackend(
+        "deepseek", search_fn=lambda q, n: SearchOutcome.failure("boom", cooldown=60)
+    )
+    provider = make_provider(
+        tmp_path, {"ds_alias": alias}, active="ds_alias", fallbacks=["ds_alias"], now=now
+    )
+    first = provider.search("q", 5)
+    assert first["success"] is False
+    second = provider.search("q", 5)
+    assert second["success"] is False
+    # The failure was recorded under the config key, so the alias is cooling.
+    assert len(alias.search_calls) == 1
+
+    now[0] = 61.0
+    provider.search("q", 5)
+    assert len(alias.search_calls) == 2
+
+
+def test_hit_backend_uses_config_key_and_rejects_spoofed_extras(tmp_path):
+    def search_fn(query, limit):
+        return SearchOutcome.success(
+            [
+                Hit(
+                    "T",
+                    "https://example.com/1",
+                    "S",
+                    extra={"backend": "spoofed", "evil": "x", "date": "2026-01-01"},
+                )
+            ]
+        )
+
+    alias = FakeBackend("deepseek", search_fn=search_fn)
+    provider = make_provider(tmp_path, {"ds_alias": alias}, active="ds_alias")
+    result = provider.search("q", 5)
+    hit = result["data"]["web"][0]
+    assert hit["backend"] == "ds_alias"
+    assert "evil" not in hit
+    assert hit["date"] == "2026-01-01"
+
+
+def test_extract_passes_total_budget_not_backend_timeout(tmp_path):
+    fake = FakeBackend("a", timeout=5.0)
+    provider = make_provider(tmp_path, {"a": fake})
+    provider.extract(["https://example.com/a"])
+    assert len(fake.extract_calls) == 1
+    assert 95.0 <= fake.extract_calls[0]["timeout"] <= 100.0
+
+
+def test_mixed_failure_and_empty_is_failure(tmp_path):
+    a = FakeBackend("a", search_fn=lambda q, n: SearchOutcome.failure("boom"))
+    b = FakeBackend("b", search_fn=lambda q, n: SearchOutcome.success([]))
+    provider = make_provider(tmp_path, {"a": a, "b": b}, on_empty="fallback")
+    result = provider.search("q", 5)
+    assert result["success"] is False
+    assert "boom" in result["error"]
+    assert "empty" in result["error"]
+
+
+def test_search_limit_is_clamped(tmp_path):
+    hits = [
+        Hit(f"T{i}", f"https://example.com/{i}") for i in range(60)
+    ]
+    fake = FakeBackend(
+        "a", search_fn=lambda q, n: SearchOutcome.success(hits)
+    )
+    provider = make_provider(tmp_path, {"a": fake})
+    assert len(provider.search("q", 100)["data"]["web"]) == 50
+    assert len(provider.search("q", 0)["data"]["web"]) == 1
+
+
+def test_backend_construction_failure_is_an_envelope(tmp_path):
+    path = tmp_path / "routes.yaml"
+    path.write_text(
+        "version: 1\nactive: auto\nbackends:\n  a: {type: deepseek}\n",
+        encoding="utf-8",
+    )
+
+    def boom(_backend_config):
+        raise RuntimeError("construction boom")
+
+    provider = SearchRouterProvider(path, backend_factory=boom)
+    result = provider.search("q", 5)
+    assert result["success"] is False
+    assert "backend construction failed" in result["error"]
+
+
+def test_empty_extract_urls_return_empty_list(tmp_path):
+    provider = make_provider(tmp_path, {"a": FakeBackend("a")})
+    assert provider.extract([]) == []
+
+
+def test_invalid_hit_urls_are_dropped(tmp_path):
+    def search_fn(query, limit):
+        return SearchOutcome.success(
+            [
+                Hit("JS", "javascript:alert(1)"),
+                Hit("File", "file:///etc/passwd"),
+                Hit("OK", "https://example.com/1"),
+            ]
+        )
+
+    fake = FakeBackend("a", search_fn=search_fn)
+    provider = make_provider(tmp_path, {"a": fake})
+    result = provider.search("q", 5)
+    assert len(result["data"]["web"]) == 1
+    assert result["data"]["web"][0]["url"] == "https://example.com/1"
+
+
+def test_extract_metadata_cannot_be_spoofed(tmp_path):
+    def extract_fn(urls):
+        return [
+            {
+                "url": urls[0],
+                "title": "T",
+                "content": "C",
+                "raw_content": "C",
+                "metadata": {
+                    "backend": "spoofed",
+                    "sourceURL": "https://wrong.example/",
+                },
+            }
+        ]
+
+    alias = FakeBackend("deepseek", extract_fn=extract_fn)
+    provider = make_provider(tmp_path, {"ds_alias": alias}, active="ds_alias")
+    entries = provider.extract(["https://example.com/a"])
+    assert entries[0]["metadata"]["backend"] == "ds_alias"
+    assert entries[0]["metadata"]["sourceURL"] == "https://example.com/a"
 
 
 def test_all_backends_failed_returns_error(tmp_path):
@@ -237,7 +380,7 @@ def test_extract_falls_back_when_all_entries_error(tmp_path):
     assert len(b.extract_calls) == 1
 
 
-def test_extract_partial_success_does_not_fall_back(tmp_path):
+def test_extract_partial_success_retries_failed_url(tmp_path):
     def extract_fn(urls):
         return [
             extract_entry(urls[0], title="T", content="C", backend="a"),
@@ -251,8 +394,10 @@ def test_extract_partial_success_does_not_fall_back(tmp_path):
         ["https://example.com/a", "https://example.com/b"]
     )
     assert entries[0]["content"] == "C"
-    assert "error" in entries[1]
-    assert b.extract_calls == []
+    assert entries[0]["metadata"]["backend"] == "a"
+    assert entries[1]["content"] == "C"
+    assert entries[1]["metadata"]["backend"] == "b"
+    assert b.extract_calls[0]["urls"] == ["https://example.com/b"]
 
 
 def test_extract_fills_missing_urls(tmp_path):

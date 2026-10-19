@@ -20,15 +20,28 @@ logger = logging.getLogger(__name__)
 
 
 def env_value(name: str) -> str:
-    """Config-aware env lookup (Hermes secrets first, then os.environ)."""
+    """Config-aware env lookup (Hermes secrets first, then os.environ).
+
+    Uses Hermes' own ``get_provider_env`` when available so profile-scoped
+    secrets stay scoped. Do not swallow ``UnscopedSecretError``: falling back
+    to raw ``os.environ`` under a multiplexed profile would leak another
+    profile's credential.
+    """
+
+    try:
+        from agent.web_search_provider import get_provider_env
+    except ImportError:
+        get_provider_env = None
+    if get_provider_env is not None:
+        return get_provider_env(name)
 
     value: Any = None
     try:
         from hermes_cli.config import get_env_value
-
+    except ImportError:
+        get_env_value = None
+    if get_env_value is not None:
         value = get_env_value(name)
-    except Exception:  # noqa: BLE001 - config layer is optional for tooling
-        value = None
     if value is None:
         value = os.environ.get(name, "")
     return str(value or "").strip()
@@ -38,36 +51,63 @@ def _truthy(value: str) -> bool:
     return (value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def deepseek_base_url() -> str:
-    raw = env_value("DEEPSEEK_BASE_URL")
+def _safe_base_url(
+    raw: str, *, default: str, official_host: str, env_name: str
+) -> str:
     if not raw:
-        return DEEPSEEK_DEFAULT
+        return default
     try:
         parts = urlsplit(raw)
     except ValueError:
-        logger.warning("ignoring invalid DEEPSEEK_BASE_URL")
-        return DEEPSEEK_DEFAULT
+        logger.warning("ignoring invalid %s", env_name)
+        return default
     host = (parts.hostname or "").lower()
     loopback = host in {"127.0.0.1", "localhost", "::1"}
+    allow_loopback = os.environ.get(
+        "SEARCH_ROUTER_ALLOW_LOOPBACK", ""
+    ).strip().lower() in {"1", "true", "yes", "on"} or os.environ.get(
+        "HERMES_DEV"
+    ) == "1"
+    try:
+        port = parts.port
+    except ValueError:
+        logger.warning("ignoring invalid port in %s", env_name)
+        return default
     safe = False
     if not parts.username and not parts.password:
-        if parts.scheme == "https" and host == "api.deepseek.com":
+        if parts.scheme == "https" and host == official_host and port in (None, 443):
             safe = parts.path in ("", "/")
-        elif parts.scheme in ("http", "https") and loopback:
+        elif parts.scheme in ("http", "https") and loopback and allow_loopback:
             safe = True
     if not safe:
+        # Never log the full URL: an override could embed credentials in userinfo.
         logger.warning(
-            "ignoring DEEPSEEK_BASE_URL=%r; expected https://api.deepseek.com "
+            "ignoring unsafe %s override (host=%r); expected https://%s "
             "or a loopback host for tests",
-            raw,
+            env_name,
+            host or "?",
+            official_host,
         )
-        return DEEPSEEK_DEFAULT
+        return default
     return raw.rstrip("/")
 
 
+def deepseek_base_url() -> str:
+    return _safe_base_url(
+        env_value("DEEPSEEK_BASE_URL"),
+        default=DEEPSEEK_DEFAULT,
+        official_host="api.deepseek.com",
+        env_name="DEEPSEEK_BASE_URL",
+    )
+
+
 def anysearch_base_url() -> str:
-    raw = env_value("ANYSEARCH_URL")
-    return (raw or ANYSEARCH_DEFAULT).rstrip("/")
+    return _safe_base_url(
+        env_value("ANYSEARCH_URL"),
+        default=ANYSEARCH_DEFAULT,
+        official_host="api.anysearch.com",
+        env_name="ANYSEARCH_URL",
+    )
 
 
 def build_backend(

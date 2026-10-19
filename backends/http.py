@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Callable
 
 import httpx
@@ -42,6 +44,13 @@ def retry_after_seconds(response: Any) -> float | None:
     try:
         return max(0.0, min(5.0, float(raw)))
     except (TypeError, ValueError):
+        pass
+    try:
+        when = parsedate_to_datetime(raw)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return max(0.0, min(5.0, (when - datetime.now(timezone.utc)).total_seconds()))
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -84,17 +93,31 @@ def post_json_retry(
     timeout: float,
     retries: int = 1,
     sleep: Callable[[float], None] = time.sleep,
+    deadline: float | None = None,
 ) -> JsonResponse:
-    """Retry 408/429/5xx and transport errors once by default."""
+    """Retry 408/429/5xx and transport errors once, bounded by ``timeout``.
 
+    The deadline covers the retries *and* the backoff sleep, so one backend
+    attempt cannot silently consume two full timeouts plus five seconds.
+    """
+
+    budget = float(timeout)
+    if deadline is None:
+        deadline = time.monotonic() + budget
     last: JsonResponse | None = None
+
     for attempt in range(retries + 1):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return last or JsonResponse(
+                None, None, f"deadline exceeded after {budget:g}s"
+            )
         result = post_json(
             client,
             url,
             headers=headers,
             json_body=json_body,
-            timeout=timeout,
+            timeout=max(0.05, min(budget, remaining)),
         )
         last = result
         retryable = (
@@ -104,12 +127,16 @@ def post_json_retry(
         )
         if not retryable or attempt >= retries:
             return result
+
         delay = (
             result.retry_after
             if result.retry_after is not None
             else 0.5 * (attempt + 1)
         )
-        sleep(min(max(0.0, delay), 5.0))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return result
+        sleep(min(max(0.0, delay), 5.0, max(0.0, remaining - 0.05)))
     return last or JsonResponse(None, None, "request failed")
 
 
@@ -117,7 +144,7 @@ def cooldown_for_status(status: int | None, *, default: float = 60.0) -> float:
     # Client mistakes (bad query, bad URL, too large) are not backend outages.
     if status in (400, 404, 413):
         return 0.0
-    if status in (401, 402, 403):
+    if status in (401, 402):
         return 3600.0
     if status == 429:
         return 120.0
