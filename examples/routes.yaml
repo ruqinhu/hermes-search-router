@@ -1,0 +1,63 @@
+# Example routes for the Hermes search router.
+#
+# Copy to ~/.hermes/plugin-data/search-router/routes.yaml and edit.
+# The router reloads this file on the next call; no gateway restart needed.
+
+version: 1
+
+# auto = use the fallback lists below.
+# Pin one backend with: deepseek | anysearch | script:local_news
+active: auto
+
+fallback:
+  search:  [deepseek, anysearch]
+  extract: [deepseek, anysearch]
+
+# What to do when a backend succeeds with zero results.
+# fallback = try the next backend; accept = return the empty result.
+on_empty: fallback
+
+search_total_timeout: 45
+extract_total_timeout: 100
+cooldown_seconds: 60
+
+backends:
+  deepseek:
+    type: deepseek
+    timeout: 30
+
+  anysearch:
+    type: anysearch
+    timeout: 30
+
+  # A new script that speaks the canonical JSON protocol.
+  local_news:
+    type: script
+    mode: canonical
+    command: ["python3", "/root/.hermes/scripts/local_news.py"]
+    timeout: 20
+
+  # An existing argv-style script: no script changes needed.
+  # This wires the byted-web-search script if its output is JSON.
+  # byted:
+  #   type: script
+  #   mode: argv
+  #   command:
+  #     ["python3",
+  #      "/root/.hermes/skills/search/byted-web-search/scripts/web_search.py",
+  #      "{query}", "--count", "{limit}"]
+  #   output: json
+  #   results_path: results
+  #   fields: {title: title, url: url, description: snippet}
+  #   timeout: 30
+
+  # AnySearch's own CLI emits {"code": 0, "data": {"results": [...]}}.
+  # anysearch_cli:
+  #   type: script
+  #   mode: argv
+  #   command:
+  #     ["python3", "/root/.hermes/scripts/anysearch_search.py",
+  #      "{query}", "--count", "{limit}", "--json"]
+  #   results_path: data.results
+  #   fields: {title: title, url: url, description: snippet}
+  #   timeout: 30
